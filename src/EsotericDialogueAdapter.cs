@@ -146,6 +146,8 @@ internal static class EsotericDialogueAdapter
         value = value.Replace('“', '"').Replace('”', '"').Replace('’', '\'');
         value = Regex.Replace(value, "\\s+", " ").Trim();
         value = Regex.Replace(value, @"(?<=\.\.\.)\s+", "");
+        value = Regex.Replace(value, @"\s+(['\""])(?=\s*(?:[,.;:!?]|$))", "$1");
+        value = Regex.Replace(value, @"\s+([\)\]\}])", "$1");
         value = Regex.Replace(value, @"\s+([,.;:!?])", "$1");
         value = Regex.Replace(value, @"([\(\[])\s+", "$1");
         return value;

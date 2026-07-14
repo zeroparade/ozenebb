@@ -20,7 +20,7 @@ using UnityEngine.Audio;
 using UnityEngine.Networking;
 using UnityEngine.UI;
 
-[BepInPlugin("spore.esotericebb.voiceoverride", "Esoteric Ebb Voice Override", "0.3.1")]
+[BepInPlugin("spore.esotericebb.voiceoverride", "Esoteric Ebb Voice Override", "0.3.2")]
 public class VoiceOverridePlugin : BasePlugin
 {
     internal static VoiceOverridePlugin? Instance;
@@ -151,7 +151,7 @@ public class VoiceOverridePlugin : BasePlugin
         if (!string.IsNullOrWhiteSpace(LiveFixRoot)) Directory.CreateDirectory(LiveFixRoot);
         if (!string.IsNullOrWhiteSpace(LiveFixOverrideRoot)) Directory.CreateDirectory(LiveFixOverrideRoot);
         LogPath = Path.Combine(logDir, "voice-override.log");
-        File.AppendAllText(LogPath, $"\n=== Esoteric Ebb Voice Override v0.3.1 loaded {DateTime.Now:O} ===\n");
+        File.AppendAllText(LogPath, $"\n=== Esoteric Ebb Voice Override v0.3.2 loaded {DateTime.Now:O} ===\n");
         WriteLog($"OverrideRoot={OverrideRoot}");
         WriteLog($"ExtraOverrideRoot={ExtraOverrideRoot}");
         WriteLog($"NarratorOverrideRoot={NarratorOverrideRoot}");
@@ -183,7 +183,7 @@ public class VoiceOverridePlugin : BasePlugin
         Patch("DialogManager", "Continued", typeof(Patch_DialogStop), nameof(Patch_DialogStop.Prefix));
         Patch("DialogManager", "EndDialog", typeof(Patch_DialogStop), nameof(Patch_DialogStop.Prefix));
         Patch("DialogManager", "ClearText", typeof(Patch_DialogStop), nameof(Patch_DialogStop.Prefix));
-        WriteLog("PLUGIN_READY v0.3.1");
+        WriteLog("PLUGIN_READY v0.3.2");
         WriteLog("STARTUP_TOAST_ARMED");
     }
 
@@ -655,7 +655,7 @@ public class VoiceOverridePlugin : BasePlugin
             var requestUrl = AddNoCacheQuery(url);
             var request = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(requestUrl);
             request.Method = "HEAD";
-            request.UserAgent = "EsotericEbbVoiceOverride/0.3.1";
+            request.UserAgent = "EsotericEbbVoiceOverride/0.3.2";
             request.AllowAutoRedirect = true;
             request.Timeout = 15000;
             request.ReadWriteTimeout = 30000;
@@ -716,7 +716,7 @@ public class VoiceOverridePlugin : BasePlugin
             var requestUrl = AddNoCacheQuery(url);
             var request = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(requestUrl);
             request.Method = "GET";
-            request.UserAgent = "EsotericEbbVoiceOverride/0.3.1";
+            request.UserAgent = "EsotericEbbVoiceOverride/0.3.2";
             request.AllowAutoRedirect = true;
             request.Timeout = 15000;
             request.ReadWriteTimeout = 30000;
@@ -974,7 +974,7 @@ public class VoiceOverridePlugin : BasePlugin
         {
             var request = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(AddNoCacheQuery(pack.UpdateUrl));
             request.Method = "GET";
-            request.UserAgent = "EsotericEbbVoiceOverride/0.3.1";
+            request.UserAgent = "EsotericEbbVoiceOverride/0.3.2";
             request.AllowAutoRedirect = true;
             request.Timeout = 30000;
             request.ReadWriteTimeout = 60000;
@@ -1228,7 +1228,7 @@ public class VoiceOverridePlugin : BasePlugin
         {
             var request = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(AddNoCacheQuery(url));
             request.Method = "GET";
-            request.UserAgent = "EsotericEbbVoiceOverride/0.3.1";
+            request.UserAgent = "EsotericEbbVoiceOverride/0.3.2";
             request.AllowAutoRedirect = true;
             request.Timeout = 30000;
             request.ReadWriteTimeout = 60000;
