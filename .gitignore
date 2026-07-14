@@ -1,0 +1,17 @@
+bin/
+obj/
+**/bin/
+**/obj/
+*.user
+*.suo
+*.log
+*.tmp
+*.cache
+__pycache__/
+*.py[cod]
+*.deps.json
+*.pdb
+*.zip
+*.sha256
+release/
+installer/EsotericEbbVoiceOverride.dll

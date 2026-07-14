@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>EsotericEbbVoiceOverride</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <NoWarn>$(NoWarn);SYSLIB0014</NoWarn>
+    <GameDir Condition="'$(GameDir)' == '' and '$(ESOTERIC_EBB_GAME_DIR)' != ''">$(ESOTERIC_EBB_GAME_DIR)</GameDir>
+    <BepInExDir>$(GameDir)\BepInEx</BepInExDir>
+  </PropertyGroup>
+  <Target Name="ValidateGameDirectory" BeforeTargets="ResolveReferences">
+    <Error Condition="'$(GameDir)' == ''" Text="Set ESOTERIC_EBB_GAME_DIR or pass -p:GameDir=... to a compatible BepInEx IL2CPP game installation." />
+    <Error Condition="!Exists('$(BepInExDir)\interop\Il2Cppmscorlib.dll')" Text="GameDir does not contain generated BepInEx IL2CPP interop assemblies: $(GameDir)" />
+  </Target>
+  <ItemGroup>
+    <Compile Include="CompilerServicesShims.cs" />
+    <Compile Include="VoiceOverridePlugin.cs" />
+    <Compile Include="EsotericDialogueAdapter.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="BepInEx.Core" HintPath="$(BepInExDir)\core\BepInEx.Core.dll" Private="false" />
+    <Reference Include="BepInEx.Unity.IL2CPP" HintPath="$(BepInExDir)\core\BepInEx.Unity.IL2CPP.dll" Private="false" />
+    <Reference Include="0Harmony" HintPath="$(BepInExDir)\core\0Harmony.dll" Private="false" />
+    <Reference Include="Il2CppInterop.Runtime" HintPath="$(BepInExDir)\core\Il2CppInterop.Runtime.dll" Private="false" />
+    <Reference Include="Il2Cppmscorlib" HintPath="$(BepInExDir)\interop\Il2Cppmscorlib.dll" Private="false">
+      <Aliases>il2cpp</Aliases>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(BepInExDir)\interop\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine.IMGUIModule" HintPath="$(BepInExDir)\interop\UnityEngine.IMGUIModule.dll" Private="false" />
+    <Reference Include="UnityEngine.UIModule" HintPath="$(BepInExDir)\interop\UnityEngine.UIModule.dll" Private="false" />
+    <Reference Include="UnityEngine.UI" HintPath="$(BepInExDir)\interop\UnityEngine.UI.dll" Private="false" />
+    <Reference Include="UnityEngine.TextRenderingModule" HintPath="$(BepInExDir)\interop\UnityEngine.TextRenderingModule.dll" Private="false" />
+    <Reference Include="Unity.TextMeshPro" HintPath="$(BepInExDir)\interop\Unity.TextMeshPro.dll" Private="false" />
+    <Reference Include="UnityEngine.InputLegacyModule" HintPath="$(BepInExDir)\interop\UnityEngine.InputLegacyModule.dll" Private="false" />
+    <Reference Include="UnityEngine.AudioModule" HintPath="$(BepInExDir)\interop\UnityEngine.AudioModule.dll" Private="false" />
+    <Reference Include="UnityEngine.UnityWebRequestModule" HintPath="$(BepInExDir)\interop\UnityEngine.UnityWebRequestModule.dll" Private="false" />
+    <Reference Include="UnityEngine.UnityWebRequestAudioModule" HintPath="$(BepInExDir)\interop\UnityEngine.UnityWebRequestAudioModule.dll" Private="false" />
+    <Reference Include="UnityEngine.UnityWebRequestWWWModule" HintPath="$(BepInExDir)\interop\UnityEngine.UnityWebRequestWWWModule.dll" Private="false" />
+    <Reference Include="FMODUnity" HintPath="$(BepInExDir)\interop\FMODUnity.dll" Private="false" />
+  </ItemGroup>
+</Project>

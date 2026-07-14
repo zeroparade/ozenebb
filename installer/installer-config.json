@@ -1,0 +1,26 @@
+{
+  "modName": "Esoteric Ebb Voice Override",
+  "disableBepInExConsole": true,
+  "bepInEx": {
+    "enabled": true,
+    "url": "https://builds.bepinex.dev/projects/bepinex_be/755/BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.755%2B3fab71a.zip"
+  },
+  "plugin": {
+    "releaseApiUrl": "https://api.github.com/repos/zeroparade/ozenebb/releases/latest",
+    "assetName": "EsotericEbbVoiceOverride.dll",
+    "sha256AssetName": "EsotericEbbVoiceOverride.dll.sha256"
+  },
+  "voicePacks": [
+    {
+      "name": "main",
+      "displayName": "Esoteric Ebb dialogue voices",
+      "enabled": true,
+      "required": true,
+      "selectedByDefault": true,
+      "parallelDownloads": 8,
+      "destination": "BepInEx/voice-overrides",
+      "baseUrl": "https://huggingface.co/datasets/zeroparade/ozenebb/resolve/main",
+      "manifestUrl": "https://huggingface.co/datasets/zeroparade/ozenebb/resolve/main/manifests/main.json?download=true"
+    }
+  ]
+}
