@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO.Compression;
 using System.IO;
 using System.Linq;
@@ -22,7 +23,7 @@ using UnityEngine.UI;
 
 internal static class VoiceModMetadata
 {
-    internal const string Version = "0.3.3";
+    internal const string Version = "0.3.4";
     internal const string UserAgent = "EsotericEbbVoiceOverride/" + Version;
     internal const string LatestReleaseApiUrl = "https://api.github.com/repos/zeroparade/ozenebb/releases/latest";
     internal const string PluginAssetName = "EsotericEbbVoiceOverride.dll";
@@ -116,6 +117,7 @@ public class VoiceOverridePlugin : BasePlugin
     private static List<VoicePackUpdateInfo> _voicePackUpdatesAvailable = new();
     private static PluginReleaseInfo? _pluginUpdateAvailable;
     private static string _pluginUpdatePendingRestartVersion = "";
+    private static string _startupPluginUpdateStatus = "";
     private static readonly Dictionary<string, string> _dialogueTextById = new(StringComparer.Ordinal);
     private static string _latestDialogueId = "";
     private static string _latestDialogueText = "";
@@ -163,6 +165,7 @@ public class VoiceOverridePlugin : BasePlugin
         if (!string.IsNullOrWhiteSpace(LiveFixOverrideRoot)) Directory.CreateDirectory(LiveFixOverrideRoot);
         LogPath = Path.Combine(logDir, "voice-override.log");
         File.AppendAllText(LogPath, $"\n=== Esoteric Ebb Voice Override v{VoiceModMetadata.Version} loaded {DateTime.Now:O} ===\n");
+        LoadPluginUpdateStatus();
         WriteLog($"OverrideRoot={OverrideRoot}");
         WriteLog($"ExtraOverrideRoot={ExtraOverrideRoot}");
         WriteLog($"NarratorOverrideRoot={NarratorOverrideRoot}");
@@ -983,9 +986,9 @@ public class VoiceOverridePlugin : BasePlugin
         {
             if (changedPacks.Count == 0)
             {
-                return $"Mod v{pluginUpdate.Version} is installed. Restart the game to activate it.{messageSuffix}";
+                return $"Mod v{pluginUpdate.Version} update is ready. Exit and relaunch the game to activate it.{messageSuffix}";
             }
-            return $"Mod v{pluginUpdate.Version} is installed and voice line updates are available. {action} Restart the game to activate the mod update.{messageSuffix}";
+            return $"Mod v{pluginUpdate.Version} update is ready and voice line updates are available. {action} Exit and relaunch the game to activate the mod update.{messageSuffix}";
         }
 
         if (pluginUpdate != null)
@@ -1115,17 +1118,17 @@ public class VoiceOverridePlugin : BasePlugin
                     if (pluginUpdate.InstalledPendingRestart)
                     {
                         pluginOutcome.RestartRequired = true;
-                        WriteLog($"PLUGIN_UPDATE_ALREADY_INSTALLED version={pluginUpdate.Version} restartRequired=true");
+                        WriteLog($"PLUGIN_UPDATE_ALREADY_STAGED version={pluginUpdate.Version} restartRequired=true");
                     }
                     else
                     {
-                        ShowToast($"Installing mod update v{pluginUpdate.Version}...", 12f);
-                        pluginOutcome.Sha256 = InstallPluginReleaseToPath(pluginUpdate, GetInstalledPluginPath());
+                        ShowToast($"Downloading mod update v{pluginUpdate.Version}...", 12f);
+                        pluginOutcome.Sha256 = StagePluginReleaseForProcessExit(pluginUpdate, GetInstalledPluginPath());
                         pluginOutcome.Updated = true;
                         pluginOutcome.RestartRequired = true;
                         _pluginUpdatePendingRestartVersion = pluginUpdate.Version;
                         pluginUpdate.InstalledPendingRestart = true;
-                        WriteLog($"PLUGIN_UPDATE_INSTALLED version={pluginUpdate.Version} sha256={pluginOutcome.Sha256} restartRequired=true");
+                        WriteLog($"PLUGIN_UPDATE_STAGED version={pluginUpdate.Version} sha256={pluginOutcome.Sha256} restartRequired=true");
                     }
                 }
             }
@@ -1200,13 +1203,13 @@ public class VoiceOverridePlugin : BasePlugin
             if (pluginOutcome.RestartRequired && updatedPacks.Count > 0)
             {
                 var packList = string.Join(", ", updatedPacks);
-                ShowToast($"Updates installed.\nMod: v{pluginOutcome.Version} (restart required)\nVoices: {packList}\nShards changed: {changedShardCount}, downloaded: {downloadedShardCount}", 20f);
+                ShowToast($"Updates ready.\nMod: v{pluginOutcome.Version} (exit and relaunch)\nVoices applied: {packList}\nShards changed: {changedShardCount}, downloaded: {downloadedShardCount}", 20f);
                 return;
             }
             if (pluginOutcome.RestartRequired)
             {
-                var verb = pluginOutcome.Updated ? "installed" : "already installed";
-                ShowToast($"Mod v{pluginOutcome.Version} {verb}.\nRestart the game to activate it.", 18f);
+                var verb = pluginOutcome.Updated ? "downloaded and verified" : "already ready";
+                ShowToast($"Mod v{pluginOutcome.Version} {verb}.\nExit and relaunch the game to activate it.", 18f);
                 return;
             }
             if (updatedPacks.Count > 0)
@@ -1228,7 +1231,7 @@ public class VoiceOverridePlugin : BasePlugin
             WriteLog($"VOICE_PACK_INSTALL_FAIL_STACK {ex}");
             if (pluginOutcome.RestartRequired)
             {
-                ShowToast($"Mod v{pluginOutcome.Version} installed; restart required.\nVoice update failed: {ex.Message}\nRun Install.bat if this keeps happening.", 18f);
+                ShowToast($"Mod v{pluginOutcome.Version} update is ready; restart required.\nVoice update failed: {ex.Message}\nRun Install.bat if this keeps happening.", 18f);
             }
             else
             {
@@ -1257,6 +1260,252 @@ public class VoiceOverridePlugin : BasePlugin
         }
         return Path.Combine(Paths.BepInExRootPath, "plugins", VoiceModMetadata.PluginAssetName);
     }
+
+    private static string GetPluginUpdateStatusPath()
+    {
+        return Path.Combine(Paths.BepInExRootPath, "config", "spore.esotericebb.plugin-update-status.json");
+    }
+
+    private static string StagePluginReleaseForProcessExit(PluginReleaseInfo release, string destination)
+    {
+        return StagePluginReleaseForProcessExit(
+            release,
+            destination,
+            Process.GetCurrentProcess().Id,
+            GetPluginUpdateStatusPath());
+    }
+
+    internal static string StagePluginReleaseForProcessExit(
+        PluginReleaseInfo release,
+        string destination,
+        int waitForProcessId,
+        string statusPath)
+    {
+        if (waitForProcessId <= 0) throw new ArgumentOutOfRangeException(nameof(waitForProcessId));
+        destination = Path.GetFullPath(destination);
+        statusPath = Path.GetFullPath(statusPath);
+        var destinationDirectory = Path.GetDirectoryName(destination)
+            ?? throw new IOException("The plugin destination directory is invalid.");
+        var updateRoot = Path.Combine(destinationDirectory, ".esoteric-ebb-self-update");
+        Directory.CreateDirectory(updateRoot);
+        Directory.CreateDirectory(Path.GetDirectoryName(statusPath) ?? updateRoot);
+
+        var pendingPlugin = Path.Combine(updateRoot, "plugin.pending");
+        var helperScript = Path.Combine(updateRoot, "apply-plugin-update.ps1");
+        var originalHash = File.Exists(destination) ? Sha256File(destination) : "";
+        var expectedHash = InstallPluginReleaseToPath(release, pendingPlugin);
+        File.WriteAllText(helperScript, PluginUpdaterScript, new System.Text.UTF8Encoding(false));
+        WritePluginUpdateStatus(
+            statusPath,
+            "scheduled",
+            release.Version,
+            $"Waiting for process {waitForProcessId} to exit before replacing the plugin.");
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "powershell.exe",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden,
+        };
+        startInfo.ArgumentList.Add("-NoProfile");
+        startInfo.ArgumentList.Add("-NonInteractive");
+        startInfo.ArgumentList.Add("-ExecutionPolicy");
+        startInfo.ArgumentList.Add("Bypass");
+        startInfo.ArgumentList.Add("-WindowStyle");
+        startInfo.ArgumentList.Add("Hidden");
+        startInfo.ArgumentList.Add("-File");
+        startInfo.ArgumentList.Add(helperScript);
+        startInfo.ArgumentList.Add("-WaitForProcessId");
+        startInfo.ArgumentList.Add(waitForProcessId.ToString());
+        startInfo.ArgumentList.Add("-PendingPath");
+        startInfo.ArgumentList.Add(pendingPlugin);
+        startInfo.ArgumentList.Add("-DestinationPath");
+        startInfo.ArgumentList.Add(destination);
+        startInfo.ArgumentList.Add("-ExpectedSha256");
+        startInfo.ArgumentList.Add(expectedHash);
+        startInfo.ArgumentList.Add("-OriginalSha256");
+        startInfo.ArgumentList.Add(originalHash);
+        startInfo.ArgumentList.Add("-StatusPath");
+        startInfo.ArgumentList.Add(statusPath);
+        startInfo.ArgumentList.Add("-Version");
+        startInfo.ArgumentList.Add(release.Version);
+
+        try
+        {
+            using var helper = Process.Start(startInfo)
+                ?? throw new InvalidOperationException("The plugin update helper did not start.");
+            WriteLog($"PLUGIN_UPDATE_HELPER_STARTED pid={helper.Id} waitFor={waitForProcessId} version={release.Version} pending={pendingPlugin} destination={destination}");
+        }
+        catch (Exception ex)
+        {
+            WritePluginUpdateStatus(statusPath, "failed", release.Version, $"Could not start update helper: {ex.Message}");
+            throw;
+        }
+
+        return expectedHash;
+    }
+
+    private static void LoadPluginUpdateStatus()
+    {
+        _startupPluginUpdateStatus = "";
+        var statusPath = GetPluginUpdateStatusPath();
+        if (!File.Exists(statusPath)) return;
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(statusPath));
+            var root = doc.RootElement;
+            var state = GetJsonString(root, "state");
+            var version = NormalizePluginVersion(GetJsonString(root, "version"));
+            var message = GetJsonString(root, "message");
+            var targetIsNewer = IsPluginReleaseNewer(version, VoiceModMetadata.Version);
+            WriteLog($"PLUGIN_UPDATE_STATUS state={state} version={version} current={VoiceModMetadata.Version} newer={targetIsNewer} message={message}");
+
+            if (!targetIsNewer)
+            {
+                if (state is "applied" or "scheduled" or "waiting")
+                {
+                    _startupPluginUpdateStatus = $"Mod v{version} update is active.";
+                }
+                TryDeleteFile(statusPath);
+                return;
+            }
+
+            if (string.Equals(state, "failed", StringComparison.OrdinalIgnoreCase))
+            {
+                _startupPluginUpdateStatus = $"Mod v{version} update failed. Run Install.bat.";
+            }
+            else if (string.Equals(state, "superseded", StringComparison.OrdinalIgnoreCase))
+            {
+                _startupPluginUpdateStatus = "A different mod update was installed.";
+                TryDeleteFile(statusPath);
+            }
+            else
+            {
+                _pluginUpdatePendingRestartVersion = version;
+                _startupPluginUpdateStatus = $"Mod v{version} update is pending. Exit and relaunch the game.";
+            }
+        }
+        catch (Exception ex)
+        {
+            WriteLog($"PLUGIN_UPDATE_STATUS_READ_FAIL {statusPath}: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static void WritePluginUpdateStatus(string statusPath, string state, string version, string message)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(statusPath) ?? ".");
+            var root = new JsonObject
+            {
+                ["state"] = state,
+                ["version"] = version,
+                ["message"] = message,
+                ["updated_at"] = DateTime.UtcNow.ToString("O"),
+            };
+            var tempPath = statusPath + ".tmp";
+            File.WriteAllText(tempPath, root.ToJsonString(), new System.Text.UTF8Encoding(false));
+            MoveFileIntoPlace(tempPath, statusPath);
+        }
+        catch (Exception ex)
+        {
+            WriteLog($"PLUGIN_UPDATE_STATUS_WRITE_FAIL {statusPath}: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private const string PluginUpdaterScript = """
+param(
+    [Parameter(Mandatory = $true)][int] $WaitForProcessId,
+    [Parameter(Mandatory = $true)][string] $PendingPath,
+    [Parameter(Mandatory = $true)][string] $DestinationPath,
+    [Parameter(Mandatory = $true)][string] $ExpectedSha256,
+    [string] $OriginalSha256 = "",
+    [Parameter(Mandatory = $true)][string] $StatusPath,
+    [Parameter(Mandatory = $true)][string] $Version
+)
+
+$ErrorActionPreference = "Stop"
+$backupPath = "$DestinationPath.previous"
+
+function Write-UpdateStatus {
+    param([string] $State, [string] $Message)
+    try {
+        $parent = Split-Path -Parent $StatusPath
+        if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+        $tempPath = "$StatusPath.tmp"
+        [ordered]@{
+            state = $State
+            version = $Version
+            message = $Message
+            updated_at = (Get-Date).ToUniversalTime().ToString("o")
+        } | ConvertTo-Json -Compress | Set-Content -LiteralPath $tempPath -Encoding UTF8
+        Move-Item -LiteralPath $tempPath -Destination $StatusPath -Force
+    } catch { }
+}
+
+try {
+    Write-UpdateStatus -State "waiting" -Message "Waiting for the game to exit."
+    try {
+        $gameProcess = Get-Process -Id $WaitForProcessId -ErrorAction Stop
+        $gameProcess.WaitForExit()
+    } catch { }
+
+    if (-not (Test-Path -LiteralPath $PendingPath -PathType Leaf)) {
+        throw "The staged plugin is missing."
+    }
+    $pendingHash = (Get-FileHash -LiteralPath $PendingPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($pendingHash -ne $ExpectedSha256.ToLowerInvariant()) {
+        throw "The staged plugin checksum is invalid."
+    }
+
+    $destinationParent = Split-Path -Parent $DestinationPath
+    if ($destinationParent) { New-Item -ItemType Directory -Force -Path $destinationParent | Out-Null }
+    if (Test-Path -LiteralPath $DestinationPath -PathType Leaf) {
+        $currentHash = (Get-FileHash -LiteralPath $DestinationPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($currentHash -eq $ExpectedSha256.ToLowerInvariant()) {
+            Remove-Item -LiteralPath $PendingPath -Force -ErrorAction SilentlyContinue
+            Write-UpdateStatus -State "applied" -Message "The plugin was already current."
+            exit 0
+        }
+        if ($OriginalSha256 -and $currentHash -ne $OriginalSha256.ToLowerInvariant()) {
+            Remove-Item -LiteralPath $PendingPath -Force -ErrorAction SilentlyContinue
+            Write-UpdateStatus -State "superseded" -Message "Another updater changed the plugin first."
+            exit 0
+        }
+        Copy-Item -LiteralPath $DestinationPath -Destination $backupPath -Force
+    }
+
+    $deadline = (Get-Date).AddSeconds(60)
+    while ($true) {
+        try {
+            Copy-Item -LiteralPath $PendingPath -Destination $DestinationPath -Force
+            $installedHash = (Get-FileHash -LiteralPath $DestinationPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($installedHash -ne $ExpectedSha256.ToLowerInvariant()) {
+                throw "The installed plugin checksum is invalid."
+            }
+            Remove-Item -LiteralPath $PendingPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+            Write-UpdateStatus -State "applied" -Message "The plugin update was applied successfully."
+            exit 0
+        } catch {
+            if ((Get-Date) -ge $deadline) { throw }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+} catch {
+    $failure = $_.Exception.Message
+    try {
+        if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
+            Copy-Item -LiteralPath $backupPath -Destination $DestinationPath -Force
+        }
+    } catch {
+        $failure = "$failure Restore failed: $($_.Exception.Message)"
+    }
+    Write-UpdateStatus -State "failed" -Message $failure
+    exit 1
+}
+""";
 
     internal static string InstallPluginReleaseToPath(PluginReleaseInfo release, string destination)
     {
@@ -3736,8 +3985,11 @@ public class VoiceOverridePlugin : BasePlugin
         var voiceCount = CountInstalledVoiceFiles();
         var status = OverrideEnabled ? "ON" : "OFF";
         var originalStatus = NativeVoiceSuppressed ? "Original VO blocked" : "Original VO active";
+        var updateStatus = string.IsNullOrWhiteSpace(_startupPluginUpdateStatus)
+            ? ""
+            : $"\n{_startupPluginUpdateStatus}";
         ShowToast(
-            $"Esoteric Ebb Voice Override: {status}\n{voiceCount:N0} custom lines ready | {originalStatus}\nF1 toggle | F9 update | F10 current line | F12 diagnostics",
+            $"Esoteric Ebb Voice Override: {status}\n{voiceCount:N0} custom lines ready | {originalStatus}\nF1 toggle | F9 update | F10 current line | F12 diagnostics{updateStatus}",
             16f);
     }
 
