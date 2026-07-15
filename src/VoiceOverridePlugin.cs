@@ -20,7 +20,16 @@ using UnityEngine.Audio;
 using UnityEngine.Networking;
 using UnityEngine.UI;
 
-[BepInPlugin("spore.esotericebb.voiceoverride", "Esoteric Ebb Voice Override", "0.3.2")]
+internal static class VoiceModMetadata
+{
+    internal const string Version = "0.3.3";
+    internal const string UserAgent = "EsotericEbbVoiceOverride/" + Version;
+    internal const string LatestReleaseApiUrl = "https://api.github.com/repos/zeroparade/ozenebb/releases/latest";
+    internal const string PluginAssetName = "EsotericEbbVoiceOverride.dll";
+    internal const string ChecksumAssetName = "EsotericEbbVoiceOverride.dll.sha256";
+}
+
+[BepInPlugin("spore.esotericebb.voiceoverride", "Esoteric Ebb Voice Override", VoiceModMetadata.Version)]
 public class VoiceOverridePlugin : BasePlugin
 {
     internal static VoiceOverridePlugin? Instance;
@@ -105,6 +114,8 @@ public class VoiceOverridePlugin : BasePlugin
     private static DateTime _nextVoicePackUpdateToastUtc = DateTime.MinValue;
     private static string _voicePackUpdateToastMessage = "";
     private static List<VoicePackUpdateInfo> _voicePackUpdatesAvailable = new();
+    private static PluginReleaseInfo? _pluginUpdateAvailable;
+    private static string _pluginUpdatePendingRestartVersion = "";
     private static readonly Dictionary<string, string> _dialogueTextById = new(StringComparer.Ordinal);
     private static string _latestDialogueId = "";
     private static string _latestDialogueText = "";
@@ -151,7 +162,7 @@ public class VoiceOverridePlugin : BasePlugin
         if (!string.IsNullOrWhiteSpace(LiveFixRoot)) Directory.CreateDirectory(LiveFixRoot);
         if (!string.IsNullOrWhiteSpace(LiveFixOverrideRoot)) Directory.CreateDirectory(LiveFixOverrideRoot);
         LogPath = Path.Combine(logDir, "voice-override.log");
-        File.AppendAllText(LogPath, $"\n=== Esoteric Ebb Voice Override v0.3.2 loaded {DateTime.Now:O} ===\n");
+        File.AppendAllText(LogPath, $"\n=== Esoteric Ebb Voice Override v{VoiceModMetadata.Version} loaded {DateTime.Now:O} ===\n");
         WriteLog($"OverrideRoot={OverrideRoot}");
         WriteLog($"ExtraOverrideRoot={ExtraOverrideRoot}");
         WriteLog($"NarratorOverrideRoot={NarratorOverrideRoot}");
@@ -183,7 +194,7 @@ public class VoiceOverridePlugin : BasePlugin
         Patch("DialogManager", "Continued", typeof(Patch_DialogStop), nameof(Patch_DialogStop.Prefix));
         Patch("DialogManager", "EndDialog", typeof(Patch_DialogStop), nameof(Patch_DialogStop.Prefix));
         Patch("DialogManager", "ClearText", typeof(Patch_DialogStop), nameof(Patch_DialogStop.Prefix));
-        WriteLog("PLUGIN_READY v0.3.2");
+        WriteLog($"PLUGIN_READY v{VoiceModMetadata.Version}");
         WriteLog("STARTUP_TOAST_ARMED");
     }
 
@@ -255,12 +266,12 @@ public class VoiceOverridePlugin : BasePlugin
             "Runtime",
             "VoicePackUpdateToastsEnabled",
             true,
-            "If true, the mod checks installed voice-pack metadata against remote URLs and shows recurring update toasts when updates are available.");
+            "If true, the mod checks GitHub plugin releases and installed voice-pack metadata, then shows recurring update toasts when updates are available.");
         _voicePackUpdateToastRepeatMinutesEntry = Config.Bind(
             "Runtime",
             "VoicePackUpdateToastRepeatMinutes",
             DefaultVoicePackUpdateToastRepeatMinutes,
-            "How often to repeat the voice-pack update toast while updates are available.");
+            "How often to repeat the mod or voice-pack update toast while updates are available.");
         _liveFixEnabledEntry = Config.Bind(
             "LiveFix",
             "LiveFixEnabled",
@@ -330,12 +341,12 @@ public class VoiceOverridePlugin : BasePlugin
             "Hotkeys",
             "InstallVoicePackUpdatesKey",
             KeyCode.F9,
-            "Runtime hotkey for downloading and installing available voice-pack updates while the game is running. Set to None to disable.");
+            "Runtime hotkey for downloading and installing available mod and voice-pack updates. Mod updates activate after restarting the game. Set to None to disable.");
         _toggleVoicePackUpdateToastsKeyEntry = Config.Bind(
             "Hotkeys",
             "ToggleVoicePackUpdateToastsKey",
             KeyCode.F11,
-            "Runtime hotkey for toggling recurring voice-pack update toasts. Set to None to disable.");
+            "Runtime hotkey for toggling recurring mod and voice-pack update toasts. Set to None to disable.");
         _toggleDebugToastsKeyEntry = Config.Bind(
             "Hotkeys",
             "ToggleDebugToastsKey",
@@ -437,6 +448,167 @@ public class VoiceOverridePlugin : BasePlugin
         return Math.Max(5, configured);
     }
 
+    private static PluginReleaseInfo? GetAvailablePluginUpdate()
+    {
+        var release = GetLatestPluginRelease();
+        if (release == null) return null;
+        if (!IsPluginReleaseNewer(release.Version, VoiceModMetadata.Version))
+        {
+            WriteLog($"PLUGIN_UPDATE_CURRENT installed={VoiceModMetadata.Version} remote={release.Version} tag={release.TagName}");
+            return null;
+        }
+
+        release.InstalledPendingRestart = string.Equals(
+            _pluginUpdatePendingRestartVersion,
+            release.Version,
+            StringComparison.OrdinalIgnoreCase);
+        WriteLog($"PLUGIN_UPDATE_AVAILABLE installed={VoiceModMetadata.Version} remote={release.Version} tag={release.TagName} pendingRestart={release.InstalledPendingRestart}");
+        return release;
+    }
+
+    internal static PluginReleaseInfo? GetLatestPluginRelease()
+    {
+        System.Net.HttpWebResponse? response = null;
+        try
+        {
+            System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12;
+        }
+        catch { }
+
+        try
+        {
+            var request = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(AddNoCacheQuery(VoiceModMetadata.LatestReleaseApiUrl));
+            request.Method = "GET";
+            request.Accept = "application/vnd.github+json";
+            request.UserAgent = VoiceModMetadata.UserAgent;
+            request.Headers["X-GitHub-Api-Version"] = "2022-11-28";
+            request.AllowAutoRedirect = true;
+            request.Timeout = 15000;
+            request.ReadWriteTimeout = 30000;
+            PrepareNoCacheRequest(request);
+            response = (System.Net.HttpWebResponse)request.GetResponse();
+            using var stream = response.GetResponseStream();
+            if (stream == null) throw new IOException("GitHub returned no release response body.");
+            using var reader = new StreamReader(stream);
+            using var doc = JsonDocument.Parse(reader.ReadToEnd());
+            var root = doc.RootElement;
+            if (GetJsonBoolean(root, "draft") || GetJsonBoolean(root, "prerelease"))
+            {
+                WriteLog("PLUGIN_UPDATE_RELEASE_SKIPPED draft-or-prerelease");
+                return null;
+            }
+
+            var tagName = GetJsonString(root, "tag_name");
+            var version = NormalizePluginVersion(tagName);
+            if (string.IsNullOrWhiteSpace(version))
+            {
+                WriteLog($"PLUGIN_UPDATE_RELEASE_INVALID_TAG tag={tagName}");
+                return null;
+            }
+
+            var pluginUrl = "";
+            var checksumUrl = "";
+            long pluginSize = -1;
+            if (root.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var asset in assets.EnumerateArray())
+                {
+                    var name = GetJsonString(asset, "name");
+                    if (string.Equals(name, VoiceModMetadata.PluginAssetName, StringComparison.Ordinal))
+                    {
+                        pluginUrl = GetJsonString(asset, "browser_download_url");
+                        pluginSize = GetJsonInt64(asset, "size");
+                    }
+                    else if (string.Equals(name, VoiceModMetadata.ChecksumAssetName, StringComparison.Ordinal))
+                    {
+                        checksumUrl = GetJsonString(asset, "browser_download_url");
+                    }
+                }
+            }
+
+            if (!IsSecureDownloadUrl(pluginUrl) || !IsSecureDownloadUrl(checksumUrl))
+            {
+                WriteLog($"PLUGIN_UPDATE_RELEASE_MISSING_ASSETS tag={tagName} plugin={(!string.IsNullOrWhiteSpace(pluginUrl))} checksum={(!string.IsNullOrWhiteSpace(checksumUrl))}");
+                return null;
+            }
+
+            return new PluginReleaseInfo
+            {
+                TagName = tagName,
+                Version = version,
+                Name = GetJsonString(root, "name"),
+                Notes = NormalizeUpdateMessage(GetJsonString(root, "body")),
+                HtmlUrl = GetJsonString(root, "html_url"),
+                PublishedAt = GetJsonString(root, "published_at"),
+                PluginUrl = pluginUrl,
+                ChecksumUrl = checksumUrl,
+                PluginSize = pluginSize,
+            };
+        }
+        catch (Exception ex)
+        {
+            WriteLog($"PLUGIN_UPDATE_RELEASE_CHECK_FAIL {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+        finally
+        {
+            try { response?.Dispose(); } catch { }
+        }
+    }
+
+    private static bool GetJsonBoolean(JsonElement element, string name)
+    {
+        try
+        {
+            return element.TryGetProperty(name, out var property)
+                && property.ValueKind is JsonValueKind.True or JsonValueKind.False
+                && property.GetBoolean();
+        }
+        catch { return false; }
+    }
+
+    private static bool IsSecureDownloadUrl(string url)
+    {
+        return Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            && string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizePluginVersion(string value)
+    {
+        var match = Regex.Match(value ?? "", @"\d+(?:\.\d+){1,3}");
+        return match.Success ? match.Value : "";
+    }
+
+    internal static bool IsPluginReleaseNewer(string candidate, string current)
+    {
+        if (!TryParsePluginVersion(candidate, out var candidateParts)
+            || !TryParsePluginVersion(current, out var currentParts))
+        {
+            return false;
+        }
+
+        for (var index = 0; index < candidateParts.Length; index++)
+        {
+            if (candidateParts[index] > currentParts[index]) return true;
+            if (candidateParts[index] < currentParts[index]) return false;
+        }
+        return false;
+    }
+
+    private static bool TryParsePluginVersion(string value, out int[] parts)
+    {
+        parts = new int[4];
+        var normalized = NormalizePluginVersion(value);
+        if (string.IsNullOrWhiteSpace(normalized)) return false;
+        var values = normalized.Split('.');
+        if (values.Length < 2 || values.Length > parts.Length) return false;
+        for (var index = 0; index < values.Length; index++)
+        {
+            if (!int.TryParse(values[index], out parts[index]) || parts[index] < 0) return false;
+        }
+        return true;
+    }
+
     private static void StartVoicePackUpdateCheck(string source, bool force)
     {
         if (!VoicePackUpdateToastsEnabled)
@@ -466,7 +638,7 @@ public class VoiceOverridePlugin : BasePlugin
             var thread = new System.Threading.Thread(() => RunVoicePackUpdateCheck(source))
             {
                 IsBackground = true,
-                Name = "EsotericEbbVoicePackUpdateCheck",
+                Name = "EsotericEbbUpdateCheck",
             };
             thread.Start();
             WriteLog($"VOICE_PACK_UPDATE_CHECK_STARTED source={source}");
@@ -482,17 +654,20 @@ public class VoiceOverridePlugin : BasePlugin
     {
         try
         {
+            PluginReleaseInfo? pluginUpdate = null;
+            try
+            {
+                pluginUpdate = GetAvailablePluginUpdate();
+            }
+            catch (Exception ex)
+            {
+                WriteLog($"PLUGIN_UPDATE_CHECK_FAIL {ex.GetType().Name}: {ex.Message}");
+            }
+
             var installedPacks = LoadInstalledVoicePackStates();
             if (installedPacks.Count == 0)
             {
                 WriteLog($"VOICE_PACK_UPDATE_STATE_EMPTY source={source}");
-                lock (_voicePackUpdateLock)
-                {
-                    _voicePackUpdateToastMessage = "";
-                    _voicePackUpdatesAvailable = new List<VoicePackUpdateInfo>();
-                    _voicePackUpdateCheckRunning = false;
-                }
-                return;
             }
 
             var changed = new List<VoicePackUpdateInfo>();
@@ -537,12 +712,18 @@ public class VoiceOverridePlugin : BasePlugin
 
             lock (_voicePackUpdateLock)
             {
-                _voicePackUpdateToastMessage = changed.Count == 0 ? "" : BuildVoicePackUpdateToast(changed);
+                _pluginUpdateAvailable = pluginUpdate;
+                _voicePackUpdateToastMessage = pluginUpdate == null && changed.Count == 0
+                    ? ""
+                    : BuildUpdateToast(pluginUpdate, changed);
                 _voicePackUpdatesAvailable = changed;
                 _nextVoicePackUpdateToastUtc = DateTime.MinValue;
                 _voicePackUpdateCheckRunning = false;
             }
-            if (changed.Count > 0) WriteLog($"VOICE_PACK_UPDATE_TOAST_READY source={source} packs={string.Join(",", changed.Select(item => item.Name))}");
+            if (pluginUpdate != null || changed.Count > 0)
+            {
+                WriteLog($"UPDATE_TOAST_READY source={source} plugin={(pluginUpdate?.Version ?? "none")} pendingRestart={(pluginUpdate?.InstalledPendingRestart ?? false)} packs={string.Join(",", changed.Select(item => item.Name))}");
+            }
         }
         catch (Exception ex)
         {
@@ -655,7 +836,7 @@ public class VoiceOverridePlugin : BasePlugin
             var requestUrl = AddNoCacheQuery(url);
             var request = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(requestUrl);
             request.Method = "HEAD";
-            request.UserAgent = "EsotericEbbVoiceOverride/0.3.2";
+            request.UserAgent = VoiceModMetadata.UserAgent;
             request.AllowAutoRedirect = true;
             request.Timeout = 15000;
             request.ReadWriteTimeout = 30000;
@@ -716,7 +897,7 @@ public class VoiceOverridePlugin : BasePlugin
             var requestUrl = AddNoCacheQuery(url);
             var request = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(requestUrl);
             request.Method = "GET";
-            request.UserAgent = "EsotericEbbVoiceOverride/0.3.2";
+            request.UserAgent = VoiceModMetadata.UserAgent;
             request.AllowAutoRedirect = true;
             request.Timeout = 15000;
             request.ReadWriteTimeout = 30000;
@@ -778,28 +959,51 @@ public class VoiceOverridePlugin : BasePlugin
         return message;
     }
 
-    private static string BuildVoicePackUpdateToast(List<VoicePackUpdateInfo> changedPacks)
+    private static string BuildUpdateToast(PluginReleaseInfo? pluginUpdate, List<VoicePackUpdateInfo> changedPacks)
     {
-        var messages = changedPacks
+        var messages = new List<string>();
+        if (pluginUpdate != null && !string.IsNullOrWhiteSpace(pluginUpdate.Notes))
+        {
+            messages.Add($"Mod v{pluginUpdate.Version}: {pluginUpdate.Notes}");
+        }
+        messages.AddRange(changedPacks
             .Where(pack => !string.IsNullOrWhiteSpace(pack.Message))
-            .Select(pack => changedPacks.Count == 1 ? pack.Message : $"{pack.DisplayName}: {pack.Message}")
-            .ToList();
+            .Select(pack => changedPacks.Count == 1 && pluginUpdate == null
+                ? pack.Message
+                : $"{pack.DisplayName}: {pack.Message}"));
+
         var installKey = GetConfiguredKeyName(_installVoicePackUpdatesKeyEntry);
         var action = installKey.Equals("None", StringComparison.OrdinalIgnoreCase)
             ? "Run Install.bat to update."
             : $"Press {installKey} to update now, or run Install.bat.";
-        var messageSuffix = messages.Count == 0 ? "" : "\n\nWhat's new:\n" + string.Join("\n\n", messages);
+        var details = NormalizeUpdateMessage(string.Join("\n\n", messages));
+        var messageSuffix = string.IsNullOrWhiteSpace(details) ? "" : "\n\nWhat's new:\n" + details;
+
+        if (pluginUpdate?.InstalledPendingRestart == true)
+        {
+            if (changedPacks.Count == 0)
+            {
+                return $"Mod v{pluginUpdate.Version} is installed. Restart the game to activate it.{messageSuffix}";
+            }
+            return $"Mod v{pluginUpdate.Version} is installed and voice line updates are available. {action} Restart the game to activate the mod update.{messageSuffix}";
+        }
+
+        if (pluginUpdate != null)
+        {
+            var headline = changedPacks.Count == 0
+                ? $"Mod update available: v{pluginUpdate.Version}."
+                : $"Mod v{pluginUpdate.Version} and voice line updates are available.";
+            return $"{headline} {action} Mod changes activate after restarting the game.{messageSuffix}";
+        }
 
         if (changedPacks.Count == 1)
         {
             return $"Voice line update available: {changedPacks[0].DisplayName}. {action}{messageSuffix}";
         }
-
         if (changedPacks.Count <= 3)
         {
             return $"Voice line updates available: {string.Join(", ", changedPacks.Select(pack => pack.DisplayName))}. {action}{messageSuffix}";
         }
-
         return $"Voice line updates available for {changedPacks.Count} packs. {action}{messageSuffix}";
     }
 
@@ -836,6 +1040,7 @@ public class VoiceOverridePlugin : BasePlugin
             {
                 _voicePackUpdateToastMessage = "";
                 _voicePackUpdatesAvailable = new List<VoicePackUpdateInfo>();
+                _pluginUpdateAvailable = null;
                 _nextVoicePackUpdateToastUtc = DateTime.MaxValue;
             }
         }
@@ -851,7 +1056,7 @@ public class VoiceOverridePlugin : BasePlugin
 
         SaveConfig();
         WriteLog($"OPTION_VOICE_PACK_UPDATE_TOASTS {enabled} source={source}");
-        ShowToast(enabled ? "Voice update toasts: ON" : "Voice update toasts: OFF");
+        ShowToast(enabled ? "Update notifications: ON" : "Update notifications: OFF");
     }
 
     private static void StartVoicePackUpdateInstall(string source)
@@ -860,7 +1065,7 @@ public class VoiceOverridePlugin : BasePlugin
         {
             if (_voicePackInstallRunning)
             {
-                ShowToast("Voice update already running.", 8f);
+                ShowToast("Update already running.", 8f);
                 return;
             }
             _voicePackInstallRunning = true;
@@ -871,7 +1076,7 @@ public class VoiceOverridePlugin : BasePlugin
             var thread = new System.Threading.Thread(() => RunVoicePackUpdateInstall(source))
             {
                 IsBackground = true,
-                Name = "EsotericEbbVoicePackInstall",
+                Name = "EsotericEbbUpdateInstall",
             };
             thread.Start();
             WriteLog($"VOICE_PACK_INSTALL_STARTED source={source}");
@@ -880,7 +1085,7 @@ public class VoiceOverridePlugin : BasePlugin
         {
             lock (_voicePackInstallLock) _voicePackInstallRunning = false;
             WriteLog($"VOICE_PACK_INSTALL_START_FAIL {source}: {ex.GetType().Name}: {ex.Message}");
-            ShowToast($"Voice update failed to start: {ex.Message}", 12f);
+            ShowToast($"Update failed to start: {ex.Message}", 12f);
         }
     }
 
@@ -889,15 +1094,52 @@ public class VoiceOverridePlugin : BasePlugin
         var updatedPacks = new List<string>();
         var changedShardCount = 0;
         var downloadedShardCount = 0;
+        var pluginOutcome = new PluginInstallOutcome();
+        Exception? pluginInstallError = null;
         try
         {
-            ShowToast("Checking voice line updates...", 8f);
+            ShowToast("Checking mod and voice updates...", 8f);
+            try
+            {
+                PluginReleaseInfo? pluginUpdate;
+                lock (_voicePackUpdateLock) pluginUpdate = _pluginUpdateAvailable;
+                pluginUpdate ??= GetAvailablePluginUpdate();
+                if (pluginUpdate != null
+                    && string.Equals(_pluginUpdatePendingRestartVersion, pluginUpdate.Version, StringComparison.OrdinalIgnoreCase))
+                {
+                    pluginUpdate.InstalledPendingRestart = true;
+                }
+                if (pluginUpdate != null)
+                {
+                    pluginOutcome.Version = pluginUpdate.Version;
+                    if (pluginUpdate.InstalledPendingRestart)
+                    {
+                        pluginOutcome.RestartRequired = true;
+                        WriteLog($"PLUGIN_UPDATE_ALREADY_INSTALLED version={pluginUpdate.Version} restartRequired=true");
+                    }
+                    else
+                    {
+                        ShowToast($"Installing mod update v{pluginUpdate.Version}...", 12f);
+                        pluginOutcome.Sha256 = InstallPluginReleaseToPath(pluginUpdate, GetInstalledPluginPath());
+                        pluginOutcome.Updated = true;
+                        pluginOutcome.RestartRequired = true;
+                        _pluginUpdatePendingRestartVersion = pluginUpdate.Version;
+                        pluginUpdate.InstalledPendingRestart = true;
+                        WriteLog($"PLUGIN_UPDATE_INSTALLED version={pluginUpdate.Version} sha256={pluginOutcome.Sha256} restartRequired=true");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                pluginInstallError = ex;
+                WriteLog($"PLUGIN_UPDATE_INSTALL_FAIL {ex.GetType().Name}: {ex.Message}");
+                WriteLog($"PLUGIN_UPDATE_INSTALL_FAIL_STACK {ex}");
+            }
+
             var installedPacks = LoadInstalledVoicePackStates();
             if (installedPacks.Count == 0)
             {
                 WriteLog($"VOICE_PACK_INSTALL_STATE_EMPTY source={source}");
-                ShowToast("No installed voice-pack metadata found. Run Install.bat once.", 14f);
-                return;
             }
 
             foreach (var pack in installedPacks)
@@ -929,42 +1171,186 @@ public class VoiceOverridePlugin : BasePlugin
                 WriteLog($"VOICE_PACK_INSTALL_PACK_DONE {pack.Name} changedShards={result.ChangedShards} downloadedShards={result.DownloadedShards} pruned={result.PrunedFiles} files={result.AudioFiles}");
             }
 
-            if (updatedPacks.Count == 0)
+            if (updatedPacks.Count > 0)
             {
-                lock (_voicePackUpdateLock)
-                {
-                    _voicePackUpdateToastMessage = "";
-                    _voicePackUpdatesAvailable = new List<VoicePackUpdateInfo>();
-                    _nextVoicePackUpdateToastUtc = DateTime.MaxValue;
-                    _lastVoicePackUpdateCheckUtc = DateTime.UtcNow;
-                }
-                ShowToast("Voice lines are already up to date.", 10f);
-                return;
+                LoadSilentCardIndex();
+                ReloadEsotericDialogueMap("VOICE_PACK_UPDATE");
             }
 
-            LoadSilentCardIndex();
-            ReloadEsotericDialogueMap("VOICE_PACK_UPDATE");
             lock (_voicePackUpdateLock)
             {
                 _voicePackUpdateToastMessage = "";
                 _voicePackUpdatesAvailable = new List<VoicePackUpdateInfo>();
+                _pluginUpdateAvailable = null;
                 _nextVoicePackUpdateToastUtc = DateTime.MaxValue;
                 _lastVoicePackUpdateCheckUtc = DateTime.UtcNow;
             }
 
-            var packList = string.Join(", ", updatedPacks);
-            ShowToast($"Voice update installed.\nUpdated: {packList}\nShards changed: {changedShardCount}, downloaded: {downloadedShardCount}\nNew lines will be used immediately.", 18f);
+            if (pluginInstallError != null)
+            {
+                if (updatedPacks.Count > 0)
+                {
+                    var packList = string.Join(", ", updatedPacks);
+                    ShowToast($"Voice lines updated: {packList}.\nMod update failed: {pluginInstallError.Message}\nRun Install.bat to update the mod.", 18f);
+                    return;
+                }
+                throw new InvalidOperationException($"Mod update failed: {pluginInstallError.Message}", pluginInstallError);
+            }
+
+            if (pluginOutcome.RestartRequired && updatedPacks.Count > 0)
+            {
+                var packList = string.Join(", ", updatedPacks);
+                ShowToast($"Updates installed.\nMod: v{pluginOutcome.Version} (restart required)\nVoices: {packList}\nShards changed: {changedShardCount}, downloaded: {downloadedShardCount}", 20f);
+                return;
+            }
+            if (pluginOutcome.RestartRequired)
+            {
+                var verb = pluginOutcome.Updated ? "installed" : "already installed";
+                ShowToast($"Mod v{pluginOutcome.Version} {verb}.\nRestart the game to activate it.", 18f);
+                return;
+            }
+            if (updatedPacks.Count > 0)
+            {
+                var packList = string.Join(", ", updatedPacks);
+                ShowToast($"Voice update installed.\nUpdated: {packList}\nShards changed: {changedShardCount}, downloaded: {downloadedShardCount}\nNew lines will be used immediately.", 18f);
+                return;
+            }
+            if (installedPacks.Count == 0)
+            {
+                ShowToast("The mod is current, but no voice-pack metadata was found. Run Install.bat once.", 14f);
+                return;
+            }
+            ShowToast("The mod and voice lines are already up to date.", 10f);
         }
         catch (Exception ex)
         {
             WriteLog($"VOICE_PACK_INSTALL_FAIL {source}: {ex.GetType().Name}: {ex.Message}");
             WriteLog($"VOICE_PACK_INSTALL_FAIL_STACK {ex}");
-            ShowToast($"Voice update failed: {ex.GetType().Name}: {ex.Message}\nRun Install.bat if this keeps happening.", 18f);
+            if (pluginOutcome.RestartRequired)
+            {
+                ShowToast($"Mod v{pluginOutcome.Version} installed; restart required.\nVoice update failed: {ex.Message}\nRun Install.bat if this keeps happening.", 18f);
+            }
+            else
+            {
+                ShowToast($"Update failed: {ex.GetType().Name}: {ex.Message}\nRun Install.bat if this keeps happening.", 18f);
+            }
         }
         finally
         {
             lock (_voicePackInstallLock) _voicePackInstallRunning = false;
         }
+    }
+
+    private static string GetInstalledPluginPath()
+    {
+        try
+        {
+            var location = typeof(VoiceOverridePlugin).Assembly.Location;
+            if (!string.IsNullOrWhiteSpace(location) && File.Exists(location))
+            {
+                return Path.GetFullPath(location);
+            }
+        }
+        catch (Exception ex)
+        {
+            WriteLog($"PLUGIN_UPDATE_LOCATION_FAIL {ex.GetType().Name}: {ex.Message}");
+        }
+        return Path.Combine(Paths.BepInExRootPath, "plugins", VoiceModMetadata.PluginAssetName);
+    }
+
+    internal static string InstallPluginReleaseToPath(PluginReleaseInfo release, string destination)
+    {
+        if (release == null) throw new ArgumentNullException(nameof(release));
+        if (!IsSecureDownloadUrl(release.PluginUrl) || !IsSecureDownloadUrl(release.ChecksumUrl))
+        {
+            throw new InvalidOperationException("The plugin release contains an unsafe download URL.");
+        }
+
+        destination = Path.GetFullPath(destination);
+        var destinationDirectory = Path.GetDirectoryName(destination)
+            ?? throw new IOException("The plugin destination directory is invalid.");
+        Directory.CreateDirectory(destinationDirectory);
+        var stagingRoot = Path.Combine(destinationDirectory, ".esoteric-ebb-update");
+        Directory.CreateDirectory(stagingRoot);
+        var downloadedPlugin = Path.Combine(stagingRoot, "plugin.download");
+        var downloadedChecksum = Path.Combine(stagingRoot, "checksum.download");
+        var pendingPlugin = destination + ".update";
+        var backupPlugin = destination + ".previous";
+        var replaced = false;
+
+        try
+        {
+            DownloadFileToPath(release.PluginUrl, downloadedPlugin, $"mod v{release.Version}");
+            DownloadFileToPath(release.ChecksumUrl, downloadedChecksum, "mod checksum");
+
+            var checksumText = File.ReadAllText(downloadedChecksum);
+            var checksumMatch = Regex.Match(checksumText, @"(?i)\b[0-9a-f]{64}\b");
+            if (!checksumMatch.Success) throw new InvalidDataException("The plugin checksum file is invalid.");
+            var expectedHash = checksumMatch.Value.ToLowerInvariant();
+            var downloadedInfo = new FileInfo(downloadedPlugin);
+            if (downloadedInfo.Length < 1024) throw new InvalidDataException("The downloaded plugin is unexpectedly small.");
+            if (release.PluginSize > 0 && downloadedInfo.Length != release.PluginSize)
+            {
+                throw new InvalidDataException($"The downloaded plugin size is {downloadedInfo.Length}, expected {release.PluginSize}.");
+            }
+            var downloadedHash = Sha256File(downloadedPlugin);
+            if (!string.Equals(downloadedHash, expectedHash, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException($"Plugin checksum mismatch. Expected {expectedHash}, got {downloadedHash}.");
+            }
+
+            File.Copy(downloadedPlugin, pendingPlugin, true);
+            if (!string.Equals(Sha256File(pendingPlugin), expectedHash, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException("The staged plugin failed checksum verification.");
+            }
+
+            if (File.Exists(destination)) File.Copy(destination, backupPlugin, true);
+            try
+            {
+                File.Copy(pendingPlugin, destination, true);
+                var installedHash = Sha256File(destination);
+                if (!string.Equals(installedHash, expectedHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException("The installed plugin failed checksum verification.");
+                }
+                replaced = true;
+                return installedHash;
+            }
+            catch
+            {
+                try
+                {
+                    if (File.Exists(backupPlugin))
+                    {
+                        File.Copy(backupPlugin, destination, true);
+                        TryDeleteFile(backupPlugin);
+                    }
+                    else
+                    {
+                        TryDeleteFile(destination);
+                    }
+                }
+                catch (Exception restoreEx)
+                {
+                    WriteLog($"PLUGIN_UPDATE_RESTORE_FAIL backup={backupPlugin} destination={destination}: {restoreEx.GetType().Name}: {restoreEx.Message}");
+                }
+                throw;
+            }
+        }
+        finally
+        {
+            TryDeleteFile(downloadedPlugin);
+            TryDeleteFile(downloadedChecksum);
+            TryDeleteFile(pendingPlugin);
+            if (replaced) TryDeleteFile(backupPlugin);
+            try { Directory.Delete(stagingRoot, false); } catch { }
+        }
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); } catch { }
     }
 
     private static VoicePackManifest? DownloadVoicePackManifest(InstalledVoicePackState pack)
@@ -974,7 +1360,7 @@ public class VoiceOverridePlugin : BasePlugin
         {
             var request = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(AddNoCacheQuery(pack.UpdateUrl));
             request.Method = "GET";
-            request.UserAgent = "EsotericEbbVoiceOverride/0.3.2";
+            request.UserAgent = VoiceModMetadata.UserAgent;
             request.AllowAutoRedirect = true;
             request.Timeout = 30000;
             request.ReadWriteTimeout = 60000;
@@ -1228,7 +1614,7 @@ public class VoiceOverridePlugin : BasePlugin
         {
             var request = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(AddNoCacheQuery(url));
             request.Method = "GET";
-            request.UserAgent = "EsotericEbbVoiceOverride/0.3.2";
+            request.UserAgent = VoiceModMetadata.UserAgent;
             request.AllowAutoRedirect = true;
             request.Timeout = 30000;
             request.ReadWriteTimeout = 60000;
@@ -1255,7 +1641,7 @@ public class VoiceOverridePlugin : BasePlugin
                             var status = total > 0
                                 ? $"{FormatBytes(copied)} / {FormatBytes(total)}"
                                 : FormatBytes(copied);
-                            ShowToast($"Downloading voice update...\n{displayName}\n{status}", 10f);
+                            ShowToast($"Downloading update...\n{displayName}\n{status}", 10f);
                         }
                     }
                     output.Flush();
@@ -2866,8 +3252,15 @@ public class VoiceOverridePlugin : BasePlugin
                 return;
             }
 
+            // The IMGUI box is only a fallback when the top-left Canvas cannot be created.
+            if (EnsureToastCanvas())
+            {
+                UpdateToastCanvas();
+                if (IsUnityObjectAlive(_toastCanvasPanel) && _toastCanvasPanel!.activeSelf) return;
+            }
+
             var isReportToast = _toastMessage.IndexOf("Esoteric Ebb Voice Override latest dialogue report", StringComparison.OrdinalIgnoreCase) >= 0;
-            var isUpdateToast = _toastMessage.IndexOf("Voice line update", StringComparison.OrdinalIgnoreCase) >= 0;
+            var isUpdateToast = _toastMessage.IndexOf("update", StringComparison.OrdinalIgnoreCase) >= 0;
             var width = isReportToast
                 ? Math.Min(1200f, Math.Max(520f, Screen.width - 64f))
                 : isUpdateToast
@@ -3344,7 +3737,7 @@ public class VoiceOverridePlugin : BasePlugin
         var status = OverrideEnabled ? "ON" : "OFF";
         var originalStatus = NativeVoiceSuppressed ? "Original VO blocked" : "Original VO active";
         ShowToast(
-            $"Esoteric Ebb Voice Override: {status}\n{voiceCount:N0} custom lines ready | {originalStatus}\nF1 toggle | F7 replay | F10 current line | F12 diagnostics",
+            $"Esoteric Ebb Voice Override: {status}\n{voiceCount:N0} custom lines ready | {originalStatus}\nF1 toggle | F9 update | F10 current line | F12 diagnostics",
             16f);
     }
 
@@ -3468,6 +3861,28 @@ public class VoiceOverridePlugin : BasePlugin
       public string Name = "";
       public string DisplayName = "";
       public string Message = "";
+  }
+
+  internal sealed class PluginReleaseInfo
+  {
+      public string TagName = "";
+      public string Version = "";
+      public string Name = "";
+      public string Notes = "";
+      public string HtmlUrl = "";
+      public string PublishedAt = "";
+      public string PluginUrl = "";
+      public string ChecksumUrl = "";
+      public long PluginSize = -1;
+      public bool InstalledPendingRestart;
+  }
+
+  private sealed class PluginInstallOutcome
+  {
+      public bool Updated;
+      public bool RestartRequired;
+      public string Version = "";
+      public string Sha256 = "";
   }
 
   private sealed class VoicePackManifest

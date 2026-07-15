@@ -1686,7 +1686,7 @@ try {
     $voiceCount = Count-AudioFiles -Path (Join-Path $GameDir "BepInEx/voice-overrides")
 
     $doneVerb = if ($Update) { "Updated" } else { "Installed" }
-    $message = "$doneVerb Esoteric Ebb Voice Override.`n`nDialogue voices: $voiceCount`n`nF1 toggles custom voices and blocks original VO while enabled. F6 marks a line for live-fix. F7 replays it. F8 toggles live-fix. F9 installs voice updates in game. F10 reports the latest dialogue. F11 toggles update toasts. F12 toggles debug toasts."
+    $message = "$doneVerb Esoteric Ebb Voice Override.`n`nDialogue voices: $voiceCount`n`nF1 toggles custom voices and blocks original VO while enabled. F6 marks a line for live-fix. F7 replays it. F8 toggles live-fix. F9 installs mod and voice updates in game. F10 reports the latest dialogue. F11 toggles update toasts. F12 toggles debug toasts."
     Write-InstallLog $message.Replace("`n", " ")
     Close-InstallerProgress
     Show-InstallerMessage -Message $message
