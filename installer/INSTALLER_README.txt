@@ -5,7 +5,7 @@ Install:
 2. Double-click Install.bat.
 3. Wait for the success message, then launch the game.
 
-The installer downloads the pinned BepInEx IL2CPP x64 build when needed, then installs the complete sharded voice pack. Later voice updates download only changed shards; in-game mod updates verify a GitHub checksum and require a restart.
+The installer downloads the pinned BepInEx IL2CPP x64 build when needed, then installs the complete sharded voice pack. Network timeouts and temporary server errors are retried automatically. Later voice updates download only changed shards; in-game mod updates verify a GitHub checksum and require a restart.
 
 Controls:
 F1 toggles custom voices. Original VO is blocked while custom voices are on.

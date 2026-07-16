@@ -17,6 +17,90 @@ $script:ProgressStatusLabel = $null
 $script:ProgressBar = $null
 $script:DefaultShardDownloadThrottle = 8
 
+function Get-InstallerEnvironmentInt {
+    param(
+        [string] $Name,
+        [int] $Default,
+        [int] $Minimum,
+        [int] $Maximum
+    )
+    $raw = [Environment]::GetEnvironmentVariable($Name)
+    $parsed = 0
+    if ([int]::TryParse($raw, [ref]$parsed)) {
+        return [Math]::Max($Minimum, [Math]::Min($Maximum, $parsed))
+    }
+    return $Default
+}
+
+$script:NetworkConnectTimeoutMs = Get-InstallerEnvironmentInt -Name "OZENEBB_CONNECT_TIMEOUT_MS" -Default 120000 -Minimum 1000 -Maximum 900000
+$script:NetworkReadWriteTimeoutMs = Get-InstallerEnvironmentInt -Name "OZENEBB_READ_TIMEOUT_MS" -Default 600000 -Minimum 1000 -Maximum 1800000
+$script:NetworkMaxAttempts = Get-InstallerEnvironmentInt -Name "OZENEBB_DOWNLOAD_ATTEMPTS" -Default 4 -Minimum 1 -Maximum 8
+
+function Get-BaseException {
+    param([Exception] $Exception)
+    $current = $Exception
+    while ($null -ne $current.InnerException -and $current.InnerException -ne $current) {
+        $current = $current.InnerException
+    }
+    return $current
+}
+
+function Test-TransientNetworkException {
+    param([Exception] $Exception)
+    $base = Get-BaseException -Exception $Exception
+    if ($base -is [System.Net.WebException]) {
+        if ($base.Status -eq [System.Net.WebExceptionStatus]::ProtocolError -and $null -ne $base.Response) {
+            $statusCode = [int]$base.Response.StatusCode
+            return $statusCode -eq 408 -or $statusCode -eq 429 -or $statusCode -ge 500
+        }
+        return $true
+    }
+    return $base -is [TimeoutException] -or $base -is [System.IO.IOException]
+}
+
+function Get-NetworkRetryDelaySeconds {
+    param([int] $Attempt)
+    if ($Attempt -le 1) { return 2 }
+    if ($Attempt -eq 2) { return 5 }
+    return [Math]::Min(30, 10 * [Math]::Pow(2, $Attempt - 3))
+}
+
+function Ensure-InstallerWebClientType {
+    if ("OzenEbbTimeoutWebClient" -as [type]) { return }
+    Add-Type -TypeDefinition @"
+using System;
+using System.Net;
+
+public sealed class OzenEbbTimeoutWebClient : WebClient
+{
+    private readonly int connectTimeoutMs;
+    private readonly int readWriteTimeoutMs;
+
+    public OzenEbbTimeoutWebClient(int connectTimeoutMs, int readWriteTimeoutMs)
+    {
+        this.connectTimeoutMs = connectTimeoutMs;
+        this.readWriteTimeoutMs = readWriteTimeoutMs;
+    }
+
+    public int ConnectTimeoutMs { get { return connectTimeoutMs; } }
+    public int ReadWriteTimeoutMs { get { return readWriteTimeoutMs; } }
+
+    protected override WebRequest GetWebRequest(Uri address)
+    {
+        WebRequest request = base.GetWebRequest(address);
+        request.Timeout = connectTimeoutMs;
+        HttpWebRequest http = request as HttpWebRequest;
+        if (http != null)
+        {
+            http.ReadWriteTimeout = readWriteTimeoutMs;
+            http.KeepAlive = false;
+        }
+        return request;
+    }
+}
+"@
+}
+
 if ($GameDir -match '^(update|--update|/update)$') {
     $Update = $true
     $GameDir = ""
@@ -384,8 +468,8 @@ function Get-RemoteVoicePackMetadata {
         $request.Method = "HEAD"
         $request.UserAgent = "EsotericEbbVoiceOverrideInstaller/1.0"
         $request.AllowAutoRedirect = $true
-        $request.Timeout = 15000
-        $request.ReadWriteTimeout = 30000
+        $request.Timeout = $script:NetworkConnectTimeoutMs
+        $request.ReadWriteTimeout = $script:NetworkReadWriteTimeoutMs
         $response = $request.GetResponse()
         $lastModified = ""
         try {
@@ -401,7 +485,8 @@ function Get-RemoteVoicePackMetadata {
         $totalBytes = -1
         if ($Url -match "\.json(\?|$)") {
             try {
-                $manifest = Invoke-RestMethod -Uri $Url -Method Get -Headers @{ "User-Agent" = "EsotericEbbVoiceOverrideInstaller/1.0" }
+                $timeoutSeconds = [int][Math]::Ceiling($script:NetworkConnectTimeoutMs / 1000.0)
+                $manifest = Invoke-RestMethod -Uri $Url -Method Get -Headers @{ "User-Agent" = "EsotericEbbVoiceOverrideInstaller/1.0" } -TimeoutSec $timeoutSeconds
                 $manifestHash = [string](Get-ObjectPropertyValue -Object $manifest -Name "manifestHash" -Default "")
                 $manifestVersion = [string](Get-ObjectPropertyValue -Object $manifest -Name "version" -Default "")
                 $fileCount = [int](Get-ObjectPropertyValue -Object $manifest -Name "fileCount" -Default -1)
@@ -504,7 +589,11 @@ function Get-VoicePackInstallStatus {
     }
 
     $installed = Get-VoicePackStateEntry -State $State -Name $name
-    $remote = Get-RemoteVoicePackMetadata -Url (Get-VoicePackUpdateUrl -Pack $Pack) -DisplayName $displayName
+    $remote = if ($audioCount -gt 0) {
+        Get-RemoteVoicePackMetadata -Url (Get-VoicePackUpdateUrl -Pack $Pack) -DisplayName $displayName
+    } else {
+        [pscustomobject]@{ ok = $false; error = "not installed" }
+    }
 
     $status = "not-installed"
     $statusText = "not installed"
@@ -570,6 +659,12 @@ function Select-VoicePacksForDownload {
     foreach ($pack in $VoicePacks) {
         $displayName = Get-VoicePackDisplayName -Pack $pack
         $status = Get-VoicePackInstallStatus -Pack $pack -GameRoot $GameRoot -State $state
+        $required = $pack.PSObject.Properties.Name -contains "required" -and [bool]$pack.required
+        if ($required) {
+            $selected.Add($pack) | Out-Null
+            Write-InstallLog "Required voice pack selected: $displayName ($($status.statusText))."
+            continue
+        }
         $selectedByDefault = Test-VoicePackDownloadDefault -Pack $pack -Status $status
         $suffix = if ($selectedByDefault) { "[Y/n]" } else { "[y/N]" }
         $answer = Read-Host "Download $displayName ($($status.statusText)) $suffix"
@@ -804,80 +899,111 @@ function Download-File {
         [string] $Destination,
         [string] $DisplayName = "voice pack"
     )
-    Write-InstallLog "Downloading $Url"
     $parent = Split-Path -Parent $Destination
     New-Item -ItemType Directory -Force -Path $parent | Out-Null
-
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $activity = "Downloading $DisplayName"
-    Set-InstallerProgress -Title $activity -Status "Connecting..." -Percent 0
+    $temporaryPath = "$Destination.download"
 
-    $request = [System.Net.HttpWebRequest]::Create($Url)
-    $request.UserAgent = "EsotericEbbVoiceOverrideInstaller/1.0"
-    $request.AllowAutoRedirect = $true
-    $request.Timeout = 30000
-    $request.ReadWriteTimeout = 300000
+    for ($attempt = 1; $attempt -le $script:NetworkMaxAttempts; $attempt++) {
+        Write-InstallLog "Downloading $Url (attempt $attempt/$($script:NetworkMaxAttempts))"
+        Set-InstallerProgress -Title $activity -Status "Connecting (attempt $attempt/$($script:NetworkMaxAttempts))..." -Percent 0
+        if (Test-Path -LiteralPath $temporaryPath) { Remove-Item -LiteralPath $temporaryPath -Force }
 
-    $response = $null
-    $inputStream = $null
-    $outputStream = $null
-    $downloaded = [Int64]0
-    $etag = ""
-    $lastModified = ""
-    $contentLength = [Int64]-1
-    try {
-        $response = $request.GetResponse()
-        $etag = [string]$response.Headers["ETag"]
+        $request = $null
+        $response = $null
+        $inputStream = $null
+        $outputStream = $null
+        $downloaded = [Int64]0
+        $etag = ""
+        $lastModified = ""
+        $contentLength = [Int64]-1
+        $failure = $null
         try {
-            if ($response.LastModified -gt [DateTime]::MinValue) {
-                $lastModified = $response.LastModified.ToUniversalTime().ToString("o")
-            }
-        } catch { }
-        $contentLength = [Int64]$response.ContentLength
-        $totalBytes = $contentLength
-        $inputStream = $response.GetResponseStream()
-        $outputStream = [System.IO.File]::Create($Destination)
-        $buffer = New-Object byte[] (1024 * 1024)
-        $startedAt = Get-Date
-        $lastUpdate = Get-Date "2000-01-01"
+            $request = [System.Net.HttpWebRequest]::Create($Url)
+            $request.UserAgent = "EsotericEbbVoiceOverrideInstaller/1.0"
+            $request.AllowAutoRedirect = $true
+            $request.KeepAlive = $false
+            $request.Timeout = $script:NetworkConnectTimeoutMs
+            $request.ReadWriteTimeout = $script:NetworkReadWriteTimeoutMs
+            $response = $request.GetResponse()
+            $etag = [string]$response.Headers["ETag"]
+            try {
+                if ($response.LastModified -gt [DateTime]::MinValue) {
+                    $lastModified = $response.LastModified.ToUniversalTime().ToString("o")
+                }
+            } catch { }
+            $contentLength = [Int64]$response.ContentLength
+            $totalBytes = $contentLength
+            $inputStream = $response.GetResponseStream()
+            if ($null -eq $inputStream) { throw "The server returned no response stream." }
+            $outputStream = [System.IO.File]::Create($temporaryPath)
+            $buffer = New-Object byte[] (1024 * 1024)
+            $startedAt = Get-Date
+            $lastUpdate = Get-Date "2000-01-01"
 
-        while (($read = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
-            $outputStream.Write($buffer, 0, $read)
-            $downloaded += $read
-            $now = Get-Date
-            if (($now - $lastUpdate).TotalMilliseconds -lt 250 -and $totalBytes -gt 0 -and $downloaded -lt $totalBytes) {
+            while (($read = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                $outputStream.Write($buffer, 0, $read)
+                $downloaded += $read
+                $now = Get-Date
+                if (($now - $lastUpdate).TotalMilliseconds -lt 250 -and $totalBytes -gt 0 -and $downloaded -lt $totalBytes) {
+                    continue
+                }
+
+                $elapsedSeconds = [Math]::Max(0.1, ($now - $startedAt).TotalSeconds)
+                $speed = [Int64]($downloaded / $elapsedSeconds)
+                if ($totalBytes -gt 0) {
+                    $percent = [int][Math]::Floor(($downloaded * 100.0) / $totalBytes)
+                    $status = "{0} of {1} ({2}/s)" -f (Format-ByteSize $downloaded), (Format-ByteSize $totalBytes), (Format-ByteSize $speed)
+                    Set-InstallerProgress -Title $activity -Status $status -Percent $percent
+                } else {
+                    $status = "{0} downloaded ({1}/s)" -f (Format-ByteSize $downloaded), (Format-ByteSize $speed)
+                    Set-InstallerProgress -Title $activity -Status $status -Percent 0 -Marquee
+                }
+                $lastUpdate = $now
+            }
+            $outputStream.Flush()
+            if ($contentLength -ge 0 -and $downloaded -ne $contentLength) {
+                throw "The download ended at $downloaded bytes; expected $contentLength bytes."
+            }
+        } catch {
+            $failure = $_.Exception
+        } finally {
+            if ($outputStream -ne $null) { $outputStream.Dispose() }
+            if ($inputStream -ne $null) { $inputStream.Dispose() }
+            if ($response -ne $null) { $response.Dispose() }
+        }
+
+        if ($null -ne $failure) {
+            if (Test-Path -LiteralPath $temporaryPath) { Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue }
+            $baseFailure = Get-BaseException -Exception $failure
+            $failureText = "$($baseFailure.GetType().Name): $($baseFailure.Message)"
+            if ($attempt -lt $script:NetworkMaxAttempts -and (Test-TransientNetworkException -Exception $failure)) {
+                $delaySeconds = Get-NetworkRetryDelaySeconds -Attempt $attempt
+                Write-InstallLog "Download attempt $attempt failed for '$DisplayName': $failureText. Retrying in $delaySeconds seconds."
+                Set-InstallerProgress -Title $activity -Status "Connection failed; retrying in $delaySeconds seconds..." -Percent 0
+                Start-Sleep -Seconds $delaySeconds
                 continue
             }
-
-            $elapsedSeconds = [Math]::Max(0.1, ($now - $startedAt).TotalSeconds)
-            $speed = [Int64]($downloaded / $elapsedSeconds)
-            if ($totalBytes -gt 0) {
-                $percent = [int][Math]::Floor(($downloaded * 100.0) / $totalBytes)
-                $status = "{0} of {1} ({2}/s)" -f (Format-ByteSize $downloaded), (Format-ByteSize $totalBytes), (Format-ByteSize $speed)
-                Set-InstallerProgress -Title $activity -Status $status -Percent $percent
-            } else {
-                $status = "{0} downloaded ({1}/s)" -f (Format-ByteSize $downloaded), (Format-ByteSize $speed)
-                Set-InstallerProgress -Title $activity -Status $status -Percent 0 -Marquee
-            }
-            $lastUpdate = $now
+            throw "Failed to download '$DisplayName' after $attempt attempt(s): $failureText"
         }
-    } finally {
-        if ($outputStream -ne $null) { $outputStream.Dispose() }
-        if ($inputStream -ne $null) { $inputStream.Dispose() }
-        if ($response -ne $null) { $response.Dispose() }
+
+        if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force }
+        Move-Item -LiteralPath $temporaryPath -Destination $Destination -Force
+        Set-InstallerProgress -Title $activity -Status "Download complete: $(Format-ByteSize ((Get-Item -LiteralPath $Destination).Length))" -Percent 100
+        Complete-InstallerProgress -Title $activity
+        return [pscustomobject]@{
+            ok = $true
+            url = $Url
+            etag = $etag
+            lastModified = $lastModified
+            contentLength = $contentLength
+            downloadedBytes = $downloaded
+            downloadedAt = (Get-Date).ToUniversalTime().ToString("o")
+        }
     }
 
-    Set-InstallerProgress -Title $activity -Status "Download complete: $(Format-ByteSize ((Get-Item -LiteralPath $Destination).Length))" -Percent 100
-    Complete-InstallerProgress -Title $activity
-    return [pscustomobject]@{
-        ok = $true
-        url = $Url
-        etag = $etag
-        lastModified = $lastModified
-        contentLength = $contentLength
-        downloadedBytes = $downloaded
-        downloadedAt = (Get-Date).ToUniversalTime().ToString("o")
-    }
+    throw "Failed to download '$DisplayName'."
 }
 
 function Install-PluginFromGitHubRelease {
@@ -969,9 +1095,12 @@ function Download-FilesParallel {
     $Throttle = [Math]::Max(1, [Math]::Min(16, $Throttle))
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     [Net.ServicePointManager]::DefaultConnectionLimit = [Math]::Max([Net.ServicePointManager]::DefaultConnectionLimit, $Throttle * 4)
+    Ensure-InstallerWebClientType
 
     $queue = New-Object System.Collections.Queue
-    foreach ($download in $downloadsArray) { $queue.Enqueue($download) }
+    foreach ($download in $downloadsArray) {
+        $queue.Enqueue([pscustomobject]@{ Download = $download; Attempt = 1 })
+    }
 
     $running = New-Object System.Collections.ArrayList
     $results = @{}
@@ -988,7 +1117,8 @@ function Download-FilesParallel {
     try {
         while ($queue.Count -gt 0 -or $running.Count -gt 0) {
             while ($queue.Count -gt 0 -and $running.Count -lt $Throttle) {
-                $download = $queue.Dequeue()
+                $queueEntry = $queue.Dequeue()
+                $download = $queueEntry.Download
                 $destination = [string]$download.Destination
                 $parent = Split-Path -Parent $destination
                 New-Item -ItemType Directory -Force -Path $parent | Out-Null
@@ -996,7 +1126,10 @@ function Download-FilesParallel {
                 $tmp = "$destination.download"
                 if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force }
 
-                $client = New-Object System.Net.WebClient
+                $client = New-Object OzenEbbTimeoutWebClient -ArgumentList @(
+                    $script:NetworkConnectTimeoutMs,
+                    $script:NetworkReadWriteTimeoutMs
+                )
                 $client.Headers.Set("User-Agent", "EsotericEbbVoiceOverrideInstaller/1.0")
                 Write-InstallLog "Queueing download $($download.Url)"
                 $task = $client.DownloadFileTaskAsync([Uri][string]$download.Url, $tmp)
@@ -1009,6 +1142,8 @@ function Download-FilesParallel {
                     Client = $client
                     Task = $task
                     StartedAt = Get-Date
+                    Download = $download
+                    Attempt = [int]$queueEntry.Attempt
                 })
             }
 
@@ -1031,19 +1166,39 @@ function Download-FilesParallel {
                 $state = $running[$i]
                 if (-not $state.Task.IsCompleted) { continue }
 
+                $downloadFailure = ""
                 try {
                     $state.Task.Wait()
                 } catch {
-                    throw "Failed to download $($state.Url): $($_.Exception.Message)"
+                    $downloadFailure = $_.Exception.GetBaseException().Message
                 } finally {
                     if ($state.Client -ne $null) { $state.Client.Dispose() }
                 }
 
-                if ($state.Task.IsFaulted) {
-                    throw "Failed to download $($state.Url): $($state.Task.Exception.GetBaseException().Message)"
+                if ([string]::IsNullOrWhiteSpace($downloadFailure) -and $state.Task.IsFaulted) {
+                    $downloadFailure = $state.Task.Exception.GetBaseException().Message
                 }
-                if ($state.Task.IsCanceled) {
-                    throw "Download cancelled: $($state.Url)"
+                if ([string]::IsNullOrWhiteSpace($downloadFailure) -and $state.Task.IsCanceled) {
+                    $downloadFailure = "Download cancelled."
+                }
+
+                if (-not [string]::IsNullOrWhiteSpace($downloadFailure)) {
+                    $running.RemoveAt($i)
+                    if (Test-Path -LiteralPath $state.TempPath) {
+                        Remove-Item -LiteralPath $state.TempPath -Force -ErrorAction SilentlyContinue
+                    }
+                    if ($state.Attempt -lt $script:NetworkMaxAttempts) {
+                        $delaySeconds = Get-NetworkRetryDelaySeconds -Attempt $state.Attempt
+                        Write-InstallLog "Shard download attempt $($state.Attempt) failed for $($state.Url): $downloadFailure. Retrying in $delaySeconds seconds."
+                        Set-InstallerProgress -Title $activity -Status "A shard connection failed; retrying in $delaySeconds seconds..." -Percent 0
+                        Start-Sleep -Seconds $delaySeconds
+                        $queue.Enqueue([pscustomobject]@{
+                            Download = $state.Download
+                            Attempt = $state.Attempt + 1
+                        })
+                        continue
+                    }
+                    throw "Failed to download $($state.Url) after $($state.Attempt) attempts: $downloadFailure"
                 }
 
                 if (Test-Path -LiteralPath $state.Destination) { Remove-Item -LiteralPath $state.Destination -Force }
@@ -1073,6 +1228,9 @@ function Download-FilesParallel {
                 if ($state.Client -ne $null) {
                     $state.Client.CancelAsync()
                     $state.Client.Dispose()
+                }
+                if (Test-Path -LiteralPath $state.TempPath) {
+                    Remove-Item -LiteralPath $state.TempPath -Force -ErrorAction SilentlyContinue
                 }
             } catch { }
         }
@@ -1628,6 +1786,7 @@ function Install-VoicePack {
 try {
     Clear-Content -LiteralPath $LogPath -ErrorAction SilentlyContinue
     Write-InstallLog "Installer started."
+    Write-InstallLog "Network settings: connectTimeoutMs=$script:NetworkConnectTimeoutMs readTimeoutMs=$script:NetworkReadWriteTimeoutMs attempts=$script:NetworkMaxAttempts parallelShards=$script:DefaultShardDownloadThrottle"
     $config = Read-InstallerConfig -PathValue $ConfigPath
 
     $GameDir = Find-GameDirectory -ExplicitGameDir $GameDir

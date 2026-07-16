@@ -41,6 +41,7 @@ The built plugin is `src/bin/Release/net6.0/EsotericEbbVoiceOverride.dll`.
 - JSONL dialogue/playback events and latest-line reports.
 - In-game GitHub plugin and voice-pack update checks with recurring notifications.
 - F9 installs checksum-verified plugin releases and changed voice shards; plugin updates activate after restart.
+- Installer and in-game downloads retry transient timeouts and server errors without replacing valid local files.
 - Original FMOD voice-over suppression while the custom pack is enabled.
 - Startup status overlay with installed-line count and core controls.
 - F1 custom-voice toggle; F6-F8 live-fix; F9 mod/voice updates; F10 report; F11 notifications; F12 diagnostics.

@@ -23,7 +23,7 @@ using UnityEngine.UI;
 
 internal static class VoiceModMetadata
 {
-    internal const string Version = "0.3.4";
+    internal const string Version = "0.3.5";
     internal const string UserAgent = "EsotericEbbVoiceOverride/" + Version;
     internal const string LatestReleaseApiUrl = "https://api.github.com/repos/zeroparade/ozenebb/releases/latest";
     internal const string PluginAssetName = "EsotericEbbVoiceOverride.dll";
@@ -144,6 +144,9 @@ public class VoiceOverridePlugin : BasePlugin
     private const int CardShownFallbackDelayMs = 175;
     private const int DefaultVoicePackUpdateToastRepeatMinutes = 30;
     private const float DefaultVoicePackUpdateToastSeconds = 14f;
+    private const int NetworkConnectTimeoutMs = 120000;
+    private const int NetworkReadWriteTimeoutMs = 600000;
+    private const int NetworkMaxAttempts = 4;
     private const string LatestDialogueReportFileName = "ESOTERIC_EBB_latest_dialogue_report.txt";
     private const int LiveFixDuplicateEventSuppressMs = 250;
     private const int LiveFixCommandPollMs = 250;
@@ -486,8 +489,8 @@ public class VoiceOverridePlugin : BasePlugin
             request.UserAgent = VoiceModMetadata.UserAgent;
             request.Headers["X-GitHub-Api-Version"] = "2022-11-28";
             request.AllowAutoRedirect = true;
-            request.Timeout = 15000;
-            request.ReadWriteTimeout = 30000;
+            request.Timeout = NetworkConnectTimeoutMs;
+            request.ReadWriteTimeout = NetworkReadWriteTimeoutMs;
             PrepareNoCacheRequest(request);
             response = (System.Net.HttpWebResponse)request.GetResponse();
             using var stream = response.GetResponseStream();
@@ -841,8 +844,8 @@ public class VoiceOverridePlugin : BasePlugin
             request.Method = "HEAD";
             request.UserAgent = VoiceModMetadata.UserAgent;
             request.AllowAutoRedirect = true;
-            request.Timeout = 15000;
-            request.ReadWriteTimeout = 30000;
+            request.Timeout = NetworkConnectTimeoutMs;
+            request.ReadWriteTimeout = NetworkReadWriteTimeoutMs;
             PrepareNoCacheRequest(request);
 
             response = (System.Net.HttpWebResponse)request.GetResponse();
@@ -890,6 +893,35 @@ public class VoiceOverridePlugin : BasePlugin
         try { request.Headers["Pragma"] = "no-cache"; } catch { }
     }
 
+    private static bool IsTransientNetworkException(Exception exception)
+    {
+        while (exception.InnerException != null && exception.InnerException != exception)
+        {
+            exception = exception.InnerException;
+        }
+        if (exception is System.Net.WebException webException)
+        {
+            if (webException.Status == System.Net.WebExceptionStatus.ProtocolError
+                && webException.Response is System.Net.HttpWebResponse response)
+            {
+                var statusCode = (int)response.StatusCode;
+                return statusCode is 408 or 429 || statusCode >= 500;
+            }
+            return true;
+        }
+        return exception is TimeoutException or IOException;
+    }
+
+    private static int GetNetworkRetryDelaySeconds(int attempt)
+    {
+        return attempt switch
+        {
+            <= 1 => 2,
+            2 => 5,
+            _ => Math.Min(30, 10 * (1 << Math.Min(3, attempt - 3))),
+        };
+    }
+
     private static void FillRemoteManifestMetadata(string url, RemoteVoicePackMetadata metadata)
     {
         if (string.IsNullOrWhiteSpace(url) || url.IndexOf(".json", StringComparison.OrdinalIgnoreCase) < 0) return;
@@ -902,8 +934,8 @@ public class VoiceOverridePlugin : BasePlugin
             request.Method = "GET";
             request.UserAgent = VoiceModMetadata.UserAgent;
             request.AllowAutoRedirect = true;
-            request.Timeout = 15000;
-            request.ReadWriteTimeout = 30000;
+            request.Timeout = NetworkConnectTimeoutMs;
+            request.ReadWriteTimeout = NetworkReadWriteTimeoutMs;
             PrepareNoCacheRequest(request);
             response = (System.Net.HttpWebResponse)request.GetResponse();
             using var stream = response.GetResponseStream();
@@ -1095,6 +1127,7 @@ public class VoiceOverridePlugin : BasePlugin
     private static void RunVoicePackUpdateInstall(string source)
     {
         var updatedPacks = new List<string>();
+        var unavailablePacks = new List<string>();
         var changedShardCount = 0;
         var downloadedShardCount = 0;
         var pluginOutcome = new PluginInstallOutcome();
@@ -1158,6 +1191,7 @@ public class VoiceOverridePlugin : BasePlugin
                 if (manifest == null)
                 {
                     WriteLog($"VOICE_PACK_INSTALL_MANIFEST_UNAVAILABLE {pack.Name}");
+                    unavailablePacks.Add(pack.DisplayName);
                     continue;
                 }
 
@@ -1198,6 +1232,24 @@ public class VoiceOverridePlugin : BasePlugin
                     return;
                 }
                 throw new InvalidOperationException($"Mod update failed: {pluginInstallError.Message}", pluginInstallError);
+            }
+
+            if (unavailablePacks.Count > 0)
+            {
+                var unavailableList = string.Join(", ", unavailablePacks);
+                if (pluginOutcome.RestartRequired)
+                {
+                    ShowToast($"Mod v{pluginOutcome.Version} update is ready; exit and relaunch.\nVoice update check failed: {unavailableList}\nPress F9 to retry.", 18f);
+                }
+                else if (updatedPacks.Count > 0)
+                {
+                    ShowToast($"Some voice updates installed.\nCould not check: {unavailableList}\nPress F9 to retry.", 18f);
+                }
+                else
+                {
+                    ShowToast($"Could not download the voice manifest for {unavailableList}.\nPress F9 to retry.", 16f);
+                }
+                return;
             }
 
             if (pluginOutcome.RestartRequired && updatedPacks.Count > 0)
@@ -1604,106 +1656,119 @@ try {
 
     private static VoicePackManifest? DownloadVoicePackManifest(InstalledVoicePackState pack)
     {
-        System.Net.HttpWebResponse? response = null;
-        try
+        for (var attempt = 1; attempt <= NetworkMaxAttempts; attempt++)
         {
-            var request = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(AddNoCacheQuery(pack.UpdateUrl));
-            request.Method = "GET";
-            request.UserAgent = VoiceModMetadata.UserAgent;
-            request.AllowAutoRedirect = true;
-            request.Timeout = 30000;
-            request.ReadWriteTimeout = 60000;
-            PrepareNoCacheRequest(request);
-            response = (System.Net.HttpWebResponse)request.GetResponse();
-            using var stream = response.GetResponseStream();
-            if (stream == null) return null;
-            using var reader = new StreamReader(stream);
-            var json = reader.ReadToEnd();
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-            var metadata = new RemoteVoicePackMetadata
+            System.Net.HttpWebResponse? response = null;
+            try
             {
-                Etag = response.Headers["ETag"] ?? "",
-                LastModified = response.LastModified > DateTime.MinValue ? response.LastModified.ToUniversalTime().ToString("o") : "",
-                ContentLength = response.ContentLength,
-                ManifestHash = GetJsonString(root, "manifestHash"),
-                ManifestVersion = GetJsonString(root, "version"),
-                UpdateMessage = GetJsonString(root, "updateMessage"),
-                FileCount = GetJsonInt64(root, "fileCount"),
-                ShardCount = GetJsonInt64(root, "shardCount"),
-                TotalBytes = GetJsonInt64(root, "totalBytes"),
-            };
-            var manifest = new VoicePackManifest
-            {
-                Name = GetJsonString(root, "pack"),
-                DisplayName = GetJsonString(root, "displayName"),
-                Destination = GetJsonString(root, "destination"),
-                Format = GetJsonString(root, "format"),
-                ManifestHash = metadata.ManifestHash,
-                Version = metadata.ManifestVersion,
-                UpdateMessage = metadata.UpdateMessage,
-                FileCount = metadata.FileCount,
-                ShardCount = metadata.ShardCount,
-                TotalBytes = metadata.TotalBytes,
-                ManifestUrl = pack.UpdateUrl,
-                Metadata = metadata,
-                RawJson = json,
-            };
-            if (string.IsNullOrWhiteSpace(manifest.Name)) manifest.Name = pack.Name;
-            if (string.IsNullOrWhiteSpace(manifest.DisplayName)) manifest.DisplayName = pack.DisplayName;
-            if (string.IsNullOrWhiteSpace(manifest.Destination)) manifest.Destination = pack.Destination;
-
-            if (root.TryGetProperty("shards", out var shardsElement) && shardsElement.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var shard in shardsElement.EnumerateArray())
+                var request = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(AddNoCacheQuery(pack.UpdateUrl));
+                request.Method = "GET";
+                request.UserAgent = VoiceModMetadata.UserAgent;
+                request.AllowAutoRedirect = true;
+                request.KeepAlive = false;
+                request.Timeout = NetworkConnectTimeoutMs;
+                request.ReadWriteTimeout = NetworkReadWriteTimeoutMs;
+                PrepareNoCacheRequest(request);
+                response = (System.Net.HttpWebResponse)request.GetResponse();
+                using var stream = response.GetResponseStream();
+                if (stream == null) throw new IOException("The manifest response stream is missing.");
+                using var reader = new StreamReader(stream);
+                var json = reader.ReadToEnd();
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+                var metadata = new RemoteVoicePackMetadata
                 {
-                    var shardInfo = new VoicePackShard
-                    {
-                        Name = GetJsonString(shard, "name"),
-                        Path = GetJsonString(shard, "path"),
-                        Url = GetJsonString(shard, "url"),
-                        Sha256 = GetJsonString(shard, "sha256"),
-                        Size = GetJsonInt64(shard, "size"),
-                        FileCount = GetJsonInt64(shard, "fileCount"),
-                    };
-                    if (string.IsNullOrWhiteSpace(shardInfo.Name)) continue;
-                    if (string.IsNullOrWhiteSpace(shardInfo.Url)) shardInfo.Url = JoinVoicePackRemotePath(pack.UpdateUrl, shardInfo.Path);
-                    manifest.Shards.Add(shardInfo);
-                }
-            }
-
-            if (root.TryGetProperty("files", out var filesElement) && filesElement.ValueKind == JsonValueKind.Object)
-            {
-                foreach (var file in filesElement.EnumerateObject())
+                    Etag = response.Headers["ETag"] ?? "",
+                    LastModified = response.LastModified > DateTime.MinValue ? response.LastModified.ToUniversalTime().ToString("o") : "",
+                    ContentLength = response.ContentLength,
+                    ManifestHash = GetJsonString(root, "manifestHash"),
+                    ManifestVersion = GetJsonString(root, "version"),
+                    UpdateMessage = GetJsonString(root, "updateMessage"),
+                    FileCount = GetJsonInt64(root, "fileCount"),
+                    ShardCount = GetJsonInt64(root, "shardCount"),
+                    TotalBytes = GetJsonInt64(root, "totalBytes"),
+                };
+                var manifest = new VoicePackManifest
                 {
-                    if (file.Value.ValueKind != JsonValueKind.Object) continue;
-                    var relativePath = GetJsonString(file.Value, "path");
-                    var shardName = GetJsonString(file.Value, "shard");
-                    if (string.IsNullOrWhiteSpace(relativePath)) continue;
-                    manifest.ManagedRelativePaths.Add(NormalizeRelativePath(relativePath));
-                    if (!string.IsNullOrWhiteSpace(shardName))
+                    Name = GetJsonString(root, "pack"),
+                    DisplayName = GetJsonString(root, "displayName"),
+                    Destination = GetJsonString(root, "destination"),
+                    Format = GetJsonString(root, "format"),
+                    ManifestHash = metadata.ManifestHash,
+                    Version = metadata.ManifestVersion,
+                    UpdateMessage = metadata.UpdateMessage,
+                    FileCount = metadata.FileCount,
+                    ShardCount = metadata.ShardCount,
+                    TotalBytes = metadata.TotalBytes,
+                    ManifestUrl = pack.UpdateUrl,
+                    Metadata = metadata,
+                    RawJson = json,
+                };
+                if (string.IsNullOrWhiteSpace(manifest.Name)) manifest.Name = pack.Name;
+                if (string.IsNullOrWhiteSpace(manifest.DisplayName)) manifest.DisplayName = pack.DisplayName;
+                if (string.IsNullOrWhiteSpace(manifest.Destination)) manifest.Destination = pack.Destination;
+
+                if (root.TryGetProperty("shards", out var shardsElement) && shardsElement.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var shard in shardsElement.EnumerateArray())
                     {
-                        if (!manifest.FilesByShard.TryGetValue(shardName, out var paths))
+                        var shardInfo = new VoicePackShard
                         {
-                            paths = new List<string>();
-                            manifest.FilesByShard[shardName] = paths;
-                        }
-                        paths.Add(relativePath);
+                            Name = GetJsonString(shard, "name"),
+                            Path = GetJsonString(shard, "path"),
+                            Url = GetJsonString(shard, "url"),
+                            Sha256 = GetJsonString(shard, "sha256"),
+                            Size = GetJsonInt64(shard, "size"),
+                            FileCount = GetJsonInt64(shard, "fileCount"),
+                        };
+                        if (string.IsNullOrWhiteSpace(shardInfo.Name)) continue;
+                        if (string.IsNullOrWhiteSpace(shardInfo.Url)) shardInfo.Url = JoinVoicePackRemotePath(pack.UpdateUrl, shardInfo.Path);
+                        manifest.Shards.Add(shardInfo);
                     }
                 }
-            }
 
-            return manifest;
+                if (root.TryGetProperty("files", out var filesElement) && filesElement.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var file in filesElement.EnumerateObject())
+                    {
+                        if (file.Value.ValueKind != JsonValueKind.Object) continue;
+                        var relativePath = GetJsonString(file.Value, "path");
+                        var shardName = GetJsonString(file.Value, "shard");
+                        if (string.IsNullOrWhiteSpace(relativePath)) continue;
+                        manifest.ManagedRelativePaths.Add(NormalizeRelativePath(relativePath));
+                        if (!string.IsNullOrWhiteSpace(shardName))
+                        {
+                            if (!manifest.FilesByShard.TryGetValue(shardName, out var paths))
+                            {
+                                paths = new List<string>();
+                                manifest.FilesByShard[shardName] = paths;
+                            }
+                            paths.Add(relativePath);
+                        }
+                    }
+                }
+
+                return manifest;
+            }
+            catch (Exception ex)
+            {
+                if (attempt < NetworkMaxAttempts && IsTransientNetworkException(ex))
+                {
+                    var delaySeconds = GetNetworkRetryDelaySeconds(attempt);
+                    WriteLog($"VOICE_PACK_INSTALL_MANIFEST_RETRY {pack.Name} attempt={attempt} delay={delaySeconds}s error={ex.GetType().Name}: {ex.Message}");
+                    ShowToast($"Manifest connection failed. Retrying in {delaySeconds}s...", 10f);
+                    System.Threading.Thread.Sleep(delaySeconds * 1000);
+                    continue;
+                }
+                WriteLog($"VOICE_PACK_INSTALL_MANIFEST_FAIL {pack.Name} attempts={attempt}: {ex.GetType().Name}: {ex.Message}");
+                return null;
+            }
+            finally
+            {
+                try { response?.Dispose(); } catch { }
+            }
         }
-        catch (Exception ex)
-        {
-            WriteLog($"VOICE_PACK_INSTALL_MANIFEST_FAIL {pack.Name}: {ex.GetType().Name}: {ex.Message}");
-            return null;
-        }
-        finally
-        {
-            try { response?.Dispose(); } catch { }
-        }
+        return null;
     }
 
     private static VoicePackInstallResult InstallVoicePackManifest(InstalledVoicePackState pack, VoicePackManifest manifest)
@@ -1858,51 +1923,81 @@ try {
     {
         Directory.CreateDirectory(Path.GetDirectoryName(destination) ?? ".");
         var tempPath = destination + ".tmp";
-        System.Net.HttpWebResponse? response = null;
-        try
+        for (var attempt = 1; attempt <= NetworkMaxAttempts; attempt++)
         {
-            var request = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(AddNoCacheQuery(url));
-            request.Method = "GET";
-            request.UserAgent = VoiceModMetadata.UserAgent;
-            request.AllowAutoRedirect = true;
-            request.Timeout = 30000;
-            request.ReadWriteTimeout = 60000;
-            PrepareNoCacheRequest(request);
-            response = (System.Net.HttpWebResponse)request.GetResponse();
-            var total = response.ContentLength;
-            using (var input = response.GetResponseStream())
+            TryDeleteFile(tempPath);
+            System.Net.HttpWebResponse? response = null;
+            Exception? failure = null;
+            try
             {
-                if (input == null) throw new IOException("No response stream.");
-                using (var output = File.Create(tempPath))
+                var request = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(AddNoCacheQuery(url));
+                request.Method = "GET";
+                request.UserAgent = VoiceModMetadata.UserAgent;
+                request.AllowAutoRedirect = true;
+                request.KeepAlive = false;
+                request.Timeout = NetworkConnectTimeoutMs;
+                request.ReadWriteTimeout = NetworkReadWriteTimeoutMs;
+                PrepareNoCacheRequest(request);
+                response = (System.Net.HttpWebResponse)request.GetResponse();
+                var total = response.ContentLength;
+                long copied = 0;
+                using (var input = response.GetResponseStream())
                 {
-                    var buffer = new byte[1024 * 1024];
-                    long copied = 0;
-                    var lastToast = DateTime.UtcNow;
-                    while (true)
+                    if (input == null) throw new IOException("No response stream.");
+                    using (var output = File.Create(tempPath))
                     {
-                        var read = input.Read(buffer, 0, buffer.Length);
-                        if (read <= 0) break;
-                        output.Write(buffer, 0, read);
-                        copied += read;
-                        if ((DateTime.UtcNow - lastToast).TotalSeconds >= 4)
+                        var buffer = new byte[1024 * 1024];
+                        var lastToast = DateTime.UtcNow;
+                        while (true)
                         {
-                            lastToast = DateTime.UtcNow;
-                            var status = total > 0
-                                ? $"{FormatBytes(copied)} / {FormatBytes(total)}"
-                                : FormatBytes(copied);
-                            ShowToast($"Downloading update...\n{displayName}\n{status}", 10f);
+                            var read = input.Read(buffer, 0, buffer.Length);
+                            if (read <= 0) break;
+                            output.Write(buffer, 0, read);
+                            copied += read;
+                            if ((DateTime.UtcNow - lastToast).TotalSeconds >= 4)
+                            {
+                                lastToast = DateTime.UtcNow;
+                                var status = total > 0
+                                    ? $"{FormatBytes(copied)} / {FormatBytes(total)}"
+                                    : FormatBytes(copied);
+                                ShowToast($"Downloading update...\n{displayName}\n{status}", 10f);
+                            }
                         }
+                        output.Flush();
                     }
-                    output.Flush();
+                }
+                if (total >= 0 && copied != total)
+                {
+                    throw new IOException($"The download ended at {copied} bytes; expected {total} bytes.");
                 }
             }
-            MoveFileIntoPlace(tempPath, destination);
+            catch (Exception ex)
+            {
+                failure = ex;
+            }
+            finally
+            {
+                try { response?.Dispose(); } catch { }
+            }
+
+            if (failure == null)
+            {
+                MoveFileIntoPlace(tempPath, destination);
+                return;
+            }
+
+            TryDeleteFile(tempPath);
+            if (attempt < NetworkMaxAttempts && IsTransientNetworkException(failure))
+            {
+                var delaySeconds = GetNetworkRetryDelaySeconds(attempt);
+                WriteLog($"UPDATE_DOWNLOAD_RETRY name={displayName} attempt={attempt} delay={delaySeconds}s error={failure.GetType().Name}: {failure.Message}");
+                ShowToast($"Download connection failed. Retrying in {delaySeconds}s...", 10f);
+                System.Threading.Thread.Sleep(delaySeconds * 1000);
+                continue;
+            }
+            throw new IOException($"Failed to download {displayName} after {attempt} attempt(s): {failure.Message}", failure);
         }
-        finally
-        {
-            try { response?.Dispose(); } catch { }
-            try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
-        }
+        throw new IOException($"Failed to download {displayName}.");
     }
 
     private static void MoveFileIntoPlace(string tempPath, string destination)
