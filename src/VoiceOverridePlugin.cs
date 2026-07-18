@@ -23,7 +23,7 @@ using UnityEngine.UI;
 
 internal static class VoiceModMetadata
 {
-    internal const string Version = "0.3.5";
+    internal const string Version = "0.3.6";
     internal const string UserAgent = "EsotericEbbVoiceOverride/" + Version;
     internal const string LatestReleaseApiUrl = "https://api.github.com/repos/zeroparade/ozenebb/releases/latest";
     internal const string PluginAssetName = "EsotericEbbVoiceOverride.dll";

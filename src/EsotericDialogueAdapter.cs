@@ -117,6 +117,15 @@ internal static class EsotericDialogueAdapter
                 return Remember(SelectMappedKey(exactKeys));
             }
 
+            var unquoted = StripEnclosingDialogueQuotes(normalized);
+            if (unquoted != normalized
+                && KeysByText.TryGetValue(unquoted, out var unquotedKeys)
+                && unquotedKeys.Count > 0)
+            {
+                _log($"RESOLVED_UNQUOTED {unquotedKeys.Count} candidate(s)");
+                return Remember(SelectMappedKey(unquotedKeys));
+            }
+
             for (var start = 0; start < normalized.Length; start++)
             {
                 if (start > 0
@@ -126,14 +135,24 @@ internal static class EsotericDialogueAdapter
                     continue;
                 }
                 var suffix = normalized.Substring(start);
-                if (!KeysByText.TryGetValue(suffix, out var suffixKeys) || suffixKeys.Count == 0) continue;
-                var resolved = SelectMappedKey(suffixKeys);
-                if (!IsSafeSuffixMatch(normalized, start, suffix))
+                var mappedSuffix = suffix;
+                if (!KeysByText.TryGetValue(mappedSuffix, out var suffixKeys) || suffixKeys.Count == 0)
                 {
-                    _log($"REJECTED_SUFFIX {resolved} prefixChars={start} suffix={LogText(suffix)}");
+                    mappedSuffix = StripEnclosingDialogueQuotes(suffix);
+                    if (mappedSuffix == suffix
+                        || !KeysByText.TryGetValue(mappedSuffix, out suffixKeys)
+                        || suffixKeys.Count == 0)
+                    {
+                        continue;
+                    }
+                }
+                var resolved = SelectMappedKey(suffixKeys);
+                if (!IsSafeSuffixMatch(normalized, start, mappedSuffix))
+                {
+                    _log($"REJECTED_SUFFIX {resolved} prefixChars={start} suffix={LogText(mappedSuffix)}");
                     continue;
                 }
-                _log($"RESOLVED_SUFFIX {resolved} prefixChars={start}");
+                _log($"RESOLVED_SUFFIX {resolved} prefixChars={start} unquoted={mappedSuffix != suffix}");
                 return Remember(resolved);
             }
             return "";
@@ -150,6 +169,15 @@ internal static class EsotericDialogueAdapter
         value = Regex.Replace(value, @"\s+([\)\]\}])", "$1");
         value = Regex.Replace(value, @"\s+([,.;:!?])", "$1");
         value = Regex.Replace(value, @"([\(\[])\s+", "$1");
+        return value;
+    }
+
+    private static string StripEnclosingDialogueQuotes(string value)
+    {
+        while (value.Length >= 2 && value[0] == '"' && value[value.Length - 1] == '"')
+        {
+            value = value.Substring(1, value.Length - 2).Trim();
+        }
         return value;
     }
 
